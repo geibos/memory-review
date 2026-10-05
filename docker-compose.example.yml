@@ -1,0 +1,29 @@
+# Example: Basic Memory + memory-review behind your own authenticating proxy.
+# memory-review has no login of its own. Expose it ONLY through a reverse proxy
+# that authenticates users (Authentik, oauth2-proxy, basic auth, ...).
+
+services:
+  basic-memory:
+    image: ghcr.io/basicmachines-co/basic-memory:latest
+    command: ["basic-memory", "mcp", "--transport", "streamable-http", "--host", "0.0.0.0", "--port", "8000", "--path", "/mcp"]
+    volumes:
+      - ./notes:/app/data/notes          # contains inbox/ and verified/
+      - ./basic-memory:/root/.basic-memory
+    environment:
+      - BASIC_MEMORY_DEFAULT_PROJECT=notes
+
+  memory-review:
+    build: .
+    depends_on: [basic-memory]
+    volumes:
+      - ./review-data:/data
+    environment:
+      - MR_LANG=en
+      - MR_MCP_URL=http://basic-memory:8000/mcp
+      - MR_PROJECT=notes
+      - MR_LLM_URL=https://llm.example.org          # any OpenAI-compatible endpoint
+      - MR_LLM_KEY=${MR_LLM_KEY}
+      - MR_MODEL=your-model-name
+      - MR_PUBLIC_ORIGIN=https://review.example.org # the URL your browser uses
+    ports:
+      - "127.0.0.1:8080:8080"                       # put your auth proxy in front
