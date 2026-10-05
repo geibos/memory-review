@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="{{ t.html_lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{ t.app_title }}</title>
+<script>
+  try { var m = localStorage.getItem("mr-theme"); if (m === "light" || m === "dark") document.documentElement.dataset.theme = m; } catch (e) {}
+</script>
+<link rel="preload" href="/static/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c6a0f6'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' stroke='%2324273a' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body class="{% if card.is_some() %}has-card{% endif %}">
+<div class="app">
+{% include "header.html" %}
+<div class="main">
+{% include "queue.html" %}
+{% include "card.html" %}
+</div>
+</div>
+</body>
+</html>

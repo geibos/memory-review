@@ -1,0 +1,83 @@
+{% if let Some(c) = card %}
+<section id="card" class="card-pane" data-id="{{ c.id }}" hx-get="/p/{{ c.id }}" hx-trigger="mr:changed from:body[window.mrCardIdle &amp;&amp; mrCardIdle()]" hx-swap="outerHTML">
+<div class="card">
+  <div class="card-head">
+    <a class="btn back" href="/" data-back>← {{ t.back }}</a>
+    <span class="tag {{ c.badge_class }}">{{ c.badge }}</span>
+    {% if let Some(p) = c.target_path %}<span class="path mono">→ {{ p }}</span>{% endif %}
+    <span class="sp"></span>
+    {% if c.can_snooze %}
+    <form hx-post="/p/{{ c.id }}/snooze" hx-target="#card" hx-swap="outerHTML"><button class="btn" id="act-snooze" type="submit">{{ t.snooze }} <kbd>S</kbd></button></form>
+    {% endif %}
+    {% if c.can_regenerate %}
+    <form hx-post="/p/{{ c.id }}/regenerate" hx-target="#card" hx-swap="outerHTML"><button class="btn warn" id="act-regenerate" type="submit">{{ t.regenerate }} <kbd>R</kbd></button></form>
+    {% endif %}
+    {% if c.can_retry %}
+    <form hx-post="/p/{{ c.id }}/retry" hx-target="#card" hx-swap="outerHTML"><button class="btn warn" id="act-retry" type="submit">{{ t.retry }}</button></form>
+    {% endif %}
+    {% if c.can_accept %}
+    <form hx-post="/p/{{ c.id }}/accept" hx-target="#card" hx-swap="outerHTML" id="accept-form">
+      <button class="btn ok" id="act-accept" type="button" data-label="{{ t.accept }}" data-armed="{{ t.accept_again }}">{{ t.accept }} <kbd>A</kbd></button>
+    </form>
+    {% endif %}
+  </div>
+
+  <h1>{{ c.title }}</h1>
+  <p class="why">{{ c.rationale }}</p>
+
+  {% if let Some(n) = c.notice %}<div class="notice info" role="status">{{ n }}</div>{% endif %}
+  {% if let Some(h) = c.hint %}<div class="notice warn">{% if c.working %}<span class="working"><span class="spinner"></span>{{ h }}</span>{% else %}{{ h }}{% endif %}</div>{% endif %}
+  {% if let Some(e) = c.error %}<div class="notice err mono">{{ e }}</div>{% endif %}
+
+  <div class="tabs">
+    <input type="radio" name="tab-{{ c.id }}" id="tab-diff" checked><label for="tab-diff">{{ t.tab_diff }}</label>
+    <input type="radio" name="tab-{{ c.id }}" id="tab-draft"><label for="tab-draft">{{ t.tab_draft }}</label>
+    <input type="radio" name="tab-{{ c.id }}" id="tab-src"><label for="tab-src">{{ t.tab_sources }} · {{ c.sources.len() }}</label>
+    <div class="panel p-diff">
+      {% if c.has_draft %}
+        {% for d in c.diffs %}
+        <div class="diff-title mono">{{ d.permalink }}</div>
+        <div class="diff">{% for l in d.lines %}<span class="{{ l.class() }}">{{ l.sign() }} {{ l.text }}</span>{% endfor %}</div>
+        {% endfor %}
+      {% else %}
+        <p class="meta">{{ t.no_draft }}</p>
+        {% for s in c.sources %}<div class="diff-title mono">− {{ s.permalink }}</div>{% endfor %}
+      {% endif %}
+    </div>
+    <div class="panel p-draft">
+      {% if c.has_draft %}<div class="md">{{ c.draft_html|safe }}</div>{% else %}<p class="meta">{{ t.no_draft }}</p>{% endif %}
+      {% if !c.tags.is_empty() %}<p class="meta">#{{ c.tags.join(" #") }}</p>{% endif %}
+    </div>
+    <div class="panel p-src">
+      {% for s in c.sources %}
+      <div class="src">
+        <div class="src-head"><strong>{{ s.title }}</strong> · <span class="mono">{{ s.permalink }}</span></div>
+        <div class="md">{{ s.html|safe }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <div class="thread">
+    {% for m in c.thread %}
+    <div class="msg {{ m.class }}{% if m.unsent %} unsent{% endif %}">
+      <div class="who"><b>{{ m.who }}</b><span>{{ t.draft_version }}{{ m.version }}</span><time datetime="{{ m.time }}">{{ m.time }}</time>{% if m.unsent %}<span>· {{ t.unsent }}</span>{% endif %}</div>
+      <div class="md">{{ m.html|safe }}</div>
+    </div>
+    {% endfor %}
+    {% if c.can_comment %}
+    <form class="compose" hx-post="/p/{{ c.id }}/comment" hx-target="#card" hx-swap="outerHTML">
+      <textarea id="comment" name="body" maxlength="20000" placeholder="{{ t.comment_placeholder }}  (C)"></textarea>
+      <div class="actions">
+        <button class="btn" type="submit" name="send" value="0">{{ t.add_comment }}</button>
+        <button class="btn primary" type="submit" name="send" value="1" id="act-send" {% if !c.can_send_any %}disabled{% endif %}>{{ t.send_to_agent }} <kbd>⌘↵</kbd></button>
+      </div>
+    </form>
+    {% endif %}
+  </div>
+  <p class="keys">{{ t.keys_hint }}</p>
+</div>
+</section>
+{% else %}
+<section id="card" class="card-pane"><div class="empty">{{ t.empty_card }}</div></section>
+{% endif %}

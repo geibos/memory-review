@@ -73,6 +73,7 @@ strings! {
     keys_hint: "J/K move · A accept · S snooze · C comment · ⌘↵ send", "J/K — навигация · A — принять · S — отложить · C — комментарий · ⌘↵ — отправить";
     queued: "queued", "в очереди";
     sources_n: "sources", "источников";
+    queue_full: "The agent queue is full; try again in a minute.", "Очередь агента переполнена, повторите через минуту.";
 }
 
 pub fn strings(lang: Lang) -> &'static Strings {

@@ -79,6 +79,48 @@ pub async fn retry(
     run(db, memory, verified_dir, id).await
 }
 
+/// Marks open cards whose sources changed (`stale`) or vanished (`closed`).
+/// Only `ready` and `snoozed` cards are checked. Returns how many changed.
+///
+/// cancel-safe: yes — each card is updated by one compare-and-set.
+pub async fn refresh(db: &Db, memory: &dyn MemoryApi, ids: &[i64]) -> anyhow::Result<usize> {
+    let mut changed = 0;
+    for &id in ids {
+        let card = load(db, id).await?;
+        if !matches!(card.status, Status::Ready | Status::Snoozed) {
+            continue;
+        }
+        let rows = db.call(move |c| db::sources(c, id)).await?;
+        let mut missing = 0;
+        let mut edited = false;
+        for r in &rows {
+            match memory.read_exact(&r.permalink).await? {
+                None => missing += 1,
+                Some(n) if content_hash(&n.raw) != r.content_hash => edited = true,
+                Some(_) => {}
+            }
+        }
+        let from = card.status;
+        let moved = if missing == rows.len() {
+            db.call(move |c| {
+                let moved = db::advance(c, id, from, &Event::SourcesGone)?;
+                if moved {
+                    db::release_sources(c, id)?;
+                }
+                Ok(moved)
+            })
+            .await?
+        } else if missing > 0 || edited {
+            db.call(move |c| db::advance(c, id, from, &Event::SourcesChanged))
+                .await?
+        } else {
+            false
+        };
+        changed += usize::from(moved);
+    }
+    Ok(changed)
+}
+
 async fn load(db: &Db, id: i64) -> anyhow::Result<db::ProposalRow> {
     db.call(move |c| db::get_proposal(c, id))
         .await?
@@ -492,6 +534,43 @@ mod tests {
             ApplyResult::AlreadyHandled
         );
         assert_eq!(mem.writes.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn refresh_marks_changed_and_gone() {
+        let (db, mem) = setup();
+        let a = mem.add("inbox", "A", "a");
+        let b = mem.add("inbox", "B", "b");
+        let c = mem.add("inbox", "C", "c");
+        let fresh = card(&db, &mem, Action::Promote, &[&a]).await;
+        let edited = card(&db, &mem, Action::Promote, &[&b]).await;
+        let gone = card(&db, &mem, Action::Promote, &[&c]).await;
+        mem.set_raw(&b, raw_note(&b, "B", "edited"));
+        mem.remove(&c);
+        let n = refresh(&db, &mem, &[fresh, edited, gone]).await.unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(status(&db, fresh).await, Status::Ready);
+        assert_eq!(status(&db, edited).await, Status::Stale);
+        assert_eq!(status(&db, gone).await, Status::Closed);
+        assert!(
+            !db.call(|c| db::claimed_permalinks(c))
+                .await
+                .unwrap()
+                .contains(&c)
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_skips_cards_in_flight() {
+        let (db, mem) = setup();
+        let a = mem.add("inbox", "A", "a");
+        let id = card(&db, &mem, Action::Promote, &[&a]).await;
+        db.call(move |c| db::cas_status(c, id, Status::Ready, Status::Applying))
+            .await
+            .unwrap();
+        mem.remove(&a);
+        assert_eq!(refresh(&db, &mem, &[id]).await.unwrap(), 0);
+        assert_eq!(status(&db, id).await, Status::Applying);
     }
 
     #[tokio::test]

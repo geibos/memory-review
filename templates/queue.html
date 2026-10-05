@@ -1,0 +1,14 @@
+<nav id="queue" class="queue" hx-get="/queue?filter={{ queue.filter }}" hx-trigger="mr:changed from:body, mr:queue from:body" hx-swap="outerHTML">
+  <div class="filters">
+    <a href="/?filter=open" class="{% if queue.filter == "open" %}on{% endif %}" hx-get="/queue?filter=open" hx-target="#queue" hx-swap="outerHTML">{{ t.filter_open }}</a>
+    <a href="/?filter=all" class="{% if queue.filter == "all" %}on{% endif %}" hx-get="/queue?filter=all" hx-target="#queue" hx-swap="outerHTML">{{ t.filter_all }}</a>
+  </div>
+  {% for row in queue.rows %}
+  <a class="row" href="/?id={{ row.id }}" data-id="{{ row.id }}" hx-get="/p/{{ row.id }}" hx-target="#card" hx-swap="outerHTML" hx-push-url="/?id={{ row.id }}">
+    <span class="tag {{ row.badge_class }}">{{ row.badge }}</span>{% if row.unsent > 0 %}<span class="dot" title="{{ t.unsent }}"></span>{% endif %}
+    <div class="ttl">{{ row.title }}</div>
+    <div class="meta">{{ row.meta }}</div>
+  </a>
+  {% endfor %}
+  {% if queue.rows.is_empty() %}<div class="empty">{{ t.empty_queue }}</div>{% endif %}
+</nav>

@@ -11,3 +11,5 @@ pub mod mcp;
 pub mod memory;
 pub mod note;
 pub mod prompts;
+pub mod render;
+pub mod web;

@@ -1,0 +1,12 @@
+<header id="top" class="top" hx-get="/header" hx-trigger="mr:changed from:body, mr:queue from:body" hx-swap="outerHTML">
+  <a class="logo" href="/">memory<b>·</b>review</a>
+  <span class="pill opt">{{ t.pill_inbox }} <strong>{{ header.inbox }}</strong></span>
+  <span class="pill">{{ t.pill_review }} <strong>{{ header.to_review }}</strong></span>
+  {% if header.with_agent > 0 %}<span class="pill busy">{{ t.pill_agent }} <strong>{{ header.with_agent }}</strong></span>{% endif %}
+  {% if let Some(now) = header.agent_now %}<span class="agent-now working"><span class="spinner"></span>{{ now }}</span>{% endif %}
+  <span class="sp"></span>
+  <button class="btn icon" type="button" id="theme-toggle" title="{{ t.theme_toggle }}" aria-label="{{ t.theme_toggle }}">◐</button>
+  <form hx-post="/triage" hx-target="#top" hx-swap="outerHTML">
+    <button class="btn primary" type="submit" {% if header.untriaged == 0 %}disabled{% endif %}>{{ t.triage_new }} · {{ header.untriaged }}</button>
+  </form>
+</header>
