@@ -13,7 +13,7 @@ use tokio::sync::{broadcast, mpsc};
 use crate::db::{self, ClaimConflict, Db, SourceRow};
 use crate::domain::{AgentProposal, ClaimContext, Event, Status, ValidatedProposal};
 use crate::llm::{ChatMessage, Llm, LlmOutcome, ToolSpec};
-use crate::memory::{InboxEntry, MemoryApi};
+use crate::memory::{InboxEntry, MemoryApi, inbox_permalinks};
 use crate::note::{RawNote, body, content_hash, folder_of};
 use crate::prompts::{Prompts, render};
 
@@ -331,6 +331,7 @@ impl Agent {
     /// Collects neighbours of `origin`. `own` are notes the card already holds.
     async fn gather(&self, origin: RawNote, own: Vec<RawNote>) -> anyhow::Result<Context> {
         let claimed = self.db.call(|c| db::claimed_permalinks(c)).await?;
+        let inbox = inbox_permalinks(self.memory.as_ref(), &self.cfg.inbox_dir).await?;
         let mut notes: HashMap<String, RawNote> = HashMap::new();
         notes.insert(origin.permalink.clone(), origin.clone());
         let mut candidates: Vec<RawNote> = own.clone();
@@ -347,7 +348,7 @@ impl Agent {
                 continue;
             }
             let folder = folder_of(&hit.permalink);
-            if folder == Some(self.cfg.inbox_dir.as_str())
+            if inbox.contains(&hit.permalink)
                 && !claimed.contains(&hit.permalink)
                 && inbox_found < MAX_INBOX_CANDIDATES
             {
@@ -356,7 +357,8 @@ impl Agent {
                     notes.insert(n.permalink.clone(), n.clone());
                     candidates.push(n);
                 }
-            } else if folder == Some(self.cfg.verified_dir.as_str())
+            } else if !inbox.contains(&hit.permalink)
+                && folder == Some(self.cfg.verified_dir.as_str())
                 && verified.len() < MAX_VERIFIED_CANDIDATES
                 && let Some(n) = self.memory.read_exact(&hit.permalink).await?
             {
@@ -508,8 +510,9 @@ impl Agent {
     ) -> anyhow::Result<()> {
         let id = card.id;
         let rows = self.db.call(move |c| db::sources(c, id)).await?;
+        let inbox = inbox_permalinks(self.memory.as_ref(), &self.cfg.inbox_dir).await?;
         let mut live: Vec<RawNote> = Vec::new();
-        for r in &rows {
+        for r in rows.iter().filter(|r| inbox.contains(&r.permalink)) {
             if let Some(n) = self.memory.read_exact(&r.permalink).await? {
                 live.push(n);
             }
@@ -686,8 +689,9 @@ impl Agent {
     /// cancel-safe: NO — same reasoning as [`Agent::reply`].
     pub async fn regenerate(&self, id: i64) -> anyhow::Result<()> {
         let rows = self.db.call(move |c| db::sources(c, id)).await?;
+        let inbox = inbox_permalinks(self.memory.as_ref(), &self.cfg.inbox_dir).await?;
         let mut live: Vec<RawNote> = Vec::new();
-        for r in &rows {
+        for r in rows.iter().filter(|r| inbox.contains(&r.permalink)) {
             if let Some(n) = self.memory.read_exact(&r.permalink).await? {
                 live.push(n);
             }
@@ -907,6 +911,22 @@ mod tests {
         // The retry told the model what was wrong.
         let seen = w.llm.seen.lock().unwrap();
         assert!(seen[2].last().unwrap().content.contains(&b));
+    }
+
+    #[tokio::test]
+    async fn note_moved_out_of_inbox_is_not_a_candidate() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        let b = w
+            .mem
+            .add("inbox", "B", "- [fact] b, already verified by hand");
+        w.mem.move_to(&b, "verified/ops");
+        let grab = json!({"action": "merge", "sources": [a, b], "target_dir": "infra",
+            "target_title": "T", "draft": "d", "rationale": "r"});
+        w.llm.push_tool(grab.clone());
+        w.llm.push_tool(grab);
+        assert!(w.agent().triage(&a).await.is_err());
+        assert!(w.claimed().await.is_empty());
     }
 
     #[tokio::test]

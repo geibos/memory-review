@@ -78,7 +78,7 @@ async fn page(s: &AppState, id: Option<i64>, filter: Option<&str>) -> Result<Res
             .iter()
             .map(|i| i.id)
             .collect();
-    if let Err(e) = apply::refresh(&s.db, s.memory.as_ref(), &open).await {
+    if let Err(e) = apply::refresh(&s.db, s.memory.as_ref(), &s.cfg.inbox_dir, &open).await {
         tracing::warn!("checking sources for changes failed: {e:#}");
     }
     let queue = queue_view(s, filter).await?;
@@ -121,7 +121,7 @@ pub async fn card(
     Path(id): Path<i64>,
     headers: HeaderMap,
 ) -> Result<Response> {
-    if let Err(e) = apply::refresh(&s.db, s.memory.as_ref(), &[id]).await {
+    if let Err(e) = apply::refresh(&s.db, s.memory.as_ref(), &s.cfg.inbox_dir, &[id]).await {
         tracing::warn!("checking sources of card {id} failed: {e:#}");
     }
     if !headers.contains_key("hx-request") {
@@ -216,7 +216,14 @@ pub async fn accept(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Re
     if status_of(&s, id).await?.is_none() {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
-    let r = apply::accept(&s.db, s.memory.as_ref(), &s.cfg.verified_dir, id).await?;
+    let r = apply::accept(
+        &s.db,
+        s.memory.as_ref(),
+        &s.cfg.inbox_dir,
+        &s.cfg.verified_dir,
+        id,
+    )
+    .await?;
     card_response(&s, load_card(&s, id, apply_notice(&s, &r)).await?)
 }
 
@@ -224,7 +231,14 @@ pub async fn retry(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Res
     if status_of(&s, id).await?.is_none() {
         return Ok(StatusCode::NOT_FOUND.into_response());
     }
-    let r = apply::retry(&s.db, s.memory.as_ref(), &s.cfg.verified_dir, id).await?;
+    let r = apply::retry(
+        &s.db,
+        s.memory.as_ref(),
+        &s.cfg.inbox_dir,
+        &s.cfg.verified_dir,
+        id,
+    )
+    .await?;
     card_response(&s, load_card(&s, id, apply_notice(&s, &r)).await?)
 }
 

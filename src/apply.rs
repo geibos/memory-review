@@ -2,7 +2,7 @@
 
 use crate::db::{self, Db};
 use crate::domain::{Action, Event, Status};
-use crate::memory::{MemoryApi, WriteOutcome};
+use crate::memory::{MemoryApi, WriteOutcome, inbox_permalinks};
 use crate::note::{content_hash, same_body};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,6 +23,7 @@ pub enum ApplyResult {
 pub async fn accept(
     db: &Db,
     memory: &dyn MemoryApi,
+    inbox_dir: &str,
     verified_dir: &str,
     id: i64,
 ) -> anyhow::Result<ApplyResult> {
@@ -31,15 +32,8 @@ pub async fn accept(
         return Ok(ApplyResult::AlreadyHandled);
     }
     let rows = db.call(move |c| db::sources(c, id)).await?;
-    let mut missing = 0;
-    let mut changed = false;
-    for r in &rows {
-        match memory.read_exact(&r.permalink).await? {
-            None => missing += 1,
-            Some(n) if content_hash(&n.raw) != r.content_hash => changed = true,
-            Some(_) => {}
-        }
-    }
+    let inbox = inbox_permalinks(memory, inbox_dir).await?;
+    let (missing, changed) = check_sources(memory, &inbox, &rows).await?;
     if missing == rows.len() {
         db.call(move |c| {
             if db::advance(c, id, Status::Ready, &Event::SourcesGone)? {
@@ -61,7 +55,7 @@ pub async fn accept(
     {
         return Ok(ApplyResult::AlreadyHandled);
     }
-    run(db, memory, verified_dir, id).await
+    run(db, memory, inbox_dir, verified_dir, id).await
 }
 
 /// Re-runs a card stuck in `applying`.
@@ -70,20 +64,49 @@ pub async fn accept(
 pub async fn retry(
     db: &Db,
     memory: &dyn MemoryApi,
+    inbox_dir: &str,
     verified_dir: &str,
     id: i64,
 ) -> anyhow::Result<ApplyResult> {
     if load(db, id).await?.status != Status::Applying {
         return Ok(ApplyResult::AlreadyHandled);
     }
-    run(db, memory, verified_dir, id).await
+    run(db, memory, inbox_dir, verified_dir, id).await
 }
 
 /// Marks open cards whose sources changed (`stale`) or vanished (`closed`).
 /// Only `ready` and `snoozed` cards are checked. Returns how many changed.
 ///
 /// cancel-safe: yes — each card is updated by one compare-and-set.
-pub async fn refresh(db: &Db, memory: &dyn MemoryApi, ids: &[i64]) -> anyhow::Result<usize> {
+/// How many sources are gone from the inbox, and whether any was edited.
+async fn check_sources(
+    memory: &dyn MemoryApi,
+    inbox: &std::collections::HashSet<String>,
+    rows: &[db::SourceRow],
+) -> anyhow::Result<(usize, bool)> {
+    let mut missing = 0;
+    let mut edited = false;
+    for r in rows {
+        if !inbox.contains(&r.permalink) {
+            missing += 1;
+            continue;
+        }
+        match memory.read_exact(&r.permalink).await? {
+            None => missing += 1,
+            Some(n) if content_hash(&n.raw) != r.content_hash => edited = true,
+            Some(_) => {}
+        }
+    }
+    Ok((missing, edited))
+}
+
+pub async fn refresh(
+    db: &Db,
+    memory: &dyn MemoryApi,
+    inbox_dir: &str,
+    ids: &[i64],
+) -> anyhow::Result<usize> {
+    let inbox = inbox_permalinks(memory, inbox_dir).await?;
     let mut changed = 0;
     for &id in ids {
         let card = load(db, id).await?;
@@ -91,15 +114,7 @@ pub async fn refresh(db: &Db, memory: &dyn MemoryApi, ids: &[i64]) -> anyhow::Re
             continue;
         }
         let rows = db.call(move |c| db::sources(c, id)).await?;
-        let mut missing = 0;
-        let mut edited = false;
-        for r in &rows {
-            match memory.read_exact(&r.permalink).await? {
-                None => missing += 1,
-                Some(n) if content_hash(&n.raw) != r.content_hash => edited = true,
-                Some(_) => {}
-            }
-        }
+        let (missing, edited) = check_sources(memory, &inbox, &rows).await?;
         let from = card.status;
         let moved = if missing == rows.len() {
             db.call(move |c| {
@@ -132,6 +147,7 @@ async fn load(db: &Db, id: i64) -> anyhow::Result<db::ProposalRow> {
 async fn run(
     db: &Db,
     memory: &dyn MemoryApi,
+    inbox_dir: &str,
     verified_dir: &str,
     id: i64,
 ) -> anyhow::Result<ApplyResult> {
@@ -141,7 +157,17 @@ async fn run(
         if card.action != Action::Delete {
             ensure_written(db, memory, verified_dir, &card).await?;
         }
+        let inbox = inbox_permalinks(memory, inbox_dir).await?;
         for r in &rows {
+            if !inbox.contains(&r.permalink) {
+                if memory.read_exact(&r.permalink).await?.is_some() {
+                    anyhow::bail!(
+                        "{} is no longer in the inbox (moved by hand?); it was not deleted",
+                        r.permalink
+                    );
+                }
+                continue; // already deleted
+            }
             let Some(current) = memory.read_exact(&r.permalink).await? else {
                 continue; // already deleted
             };
@@ -279,7 +305,7 @@ mod tests {
         let a = mem.add("inbox", "A", "- [fact] a");
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Accepted
         );
         assert!(mem.raw(&a).is_none());
@@ -301,7 +327,7 @@ mod tests {
         let b = mem.add("inbox", "B", "b");
         let id = card(&db, &mem, Action::Merge, &[&a, &b]).await;
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Accepted
         );
         assert!(mem.raw(&a).is_none() && mem.raw(&b).is_none());
@@ -314,7 +340,7 @@ mod tests {
         let a = mem.add("inbox", "A", "a");
         let id = card(&db, &mem, Action::Delete, &[&a]).await;
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Accepted
         );
         assert!(mem.raw(&a).is_none());
@@ -328,7 +354,7 @@ mod tests {
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         mem.set_raw(&a, raw_note(&a, "A", "edited in Obsidian"));
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Stale
         );
         assert_eq!(status(&db, id).await, Status::Stale);
@@ -344,7 +370,7 @@ mod tests {
         let id = card(&db, &mem, Action::Merge, &[&a, &b]).await;
         mem.remove(&b);
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Stale
         );
         assert_eq!(status(&db, id).await, Status::Stale);
@@ -362,7 +388,7 @@ mod tests {
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         mem.remove(&a);
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Stale
         );
         assert_eq!(status(&db, id).await, Status::Closed);
@@ -380,8 +406,8 @@ mod tests {
         let a = mem.add("inbox", "A", "a");
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         let (r1, r2) = tokio::join!(
-            accept(&db, &mem, "verified", id),
-            accept(&db, &mem, "verified", id)
+            accept(&db, &mem, "inbox", "verified", id),
+            accept(&db, &mem, "inbox", "verified", id)
         );
         let mut results = [r1.unwrap(), r2.unwrap()];
         results.sort_by_key(|r| format!("{r:?}"));
@@ -401,7 +427,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::AlreadyHandled
         );
     }
@@ -413,7 +439,7 @@ mod tests {
         mem.add("verified/ops", "Final", "- [fact] final\n");
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         assert_eq!(
-            accept(&db, &mem, "verified", id).await.unwrap(),
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Accepted
         );
         assert!(mem.raw(&a).is_none());
@@ -431,7 +457,7 @@ mod tests {
         let a = mem.add("inbox", "A", "a");
         mem.add("verified/ops", "Final", "something else entirely");
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
-        let r = accept(&db, &mem, "verified", id).await.unwrap();
+        let r = accept(&db, &mem, "inbox", "verified", id).await.unwrap();
         assert!(
             matches!(&r, ApplyResult::Failed(e) if e.contains("Final")),
             "{r:?}"
@@ -460,14 +486,14 @@ mod tests {
         let a = mem.add("inbox", "A", "a");
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         mem.fail_next.lock().unwrap().push("delete");
-        let r = accept(&db, &mem, "verified", id).await.unwrap();
+        let r = accept(&db, &mem, "inbox", "verified", id).await.unwrap();
         assert!(matches!(r, ApplyResult::Failed(_)), "{r:?}");
         assert!(mem.raw("p/verified/ops/final").is_some());
         assert!(mem.raw(&a).is_some());
         assert_eq!(status(&db, id).await, Status::Applying);
 
         assert_eq!(
-            retry(&db, &mem, "verified", id).await.unwrap(),
+            retry(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Accepted
         );
         assert_eq!(
@@ -492,10 +518,10 @@ mod tests {
         // The write "failed" from our side, yet the note landed (lost response).
         mem.fail_next.lock().unwrap().push("write");
         mem.add("verified/ops", "Final", "- [fact] final");
-        let r = accept(&db, &mem, "verified", id).await.unwrap();
+        let r = accept(&db, &mem, "inbox", "verified", id).await.unwrap();
         assert!(matches!(r, ApplyResult::Failed(_)));
         assert_eq!(
-            retry(&db, &mem, "verified", id).await.unwrap(),
+            retry(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::Accepted
         );
     }
@@ -506,7 +532,7 @@ mod tests {
         let a = mem.add("inbox", "A", "a");
         let id = card(&db, &mem, Action::Delete, &[&a]).await;
         mem.delete_noop.store(true, Ordering::SeqCst);
-        let r = accept(&db, &mem, "verified", id).await.unwrap();
+        let r = accept(&db, &mem, "inbox", "verified", id).await.unwrap();
         assert!(matches!(r, ApplyResult::Failed(_)), "{r:?}");
         assert_eq!(status(&db, id).await, Status::Applying);
     }
@@ -517,9 +543,9 @@ mod tests {
         let a = mem.add("inbox", "A", "a");
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         mem.fail_next.lock().unwrap().push("delete");
-        accept(&db, &mem, "verified", id).await.unwrap();
+        accept(&db, &mem, "inbox", "verified", id).await.unwrap();
         mem.set_raw(&a, raw_note(&a, "A", "new knowledge added after accepting"));
-        let r = retry(&db, &mem, "verified", id).await.unwrap();
+        let r = retry(&db, &mem, "inbox", "verified", id).await.unwrap();
         assert!(matches!(r, ApplyResult::Failed(_)), "{r:?}");
         assert!(mem.raw(&a).unwrap().contains("new knowledge"));
     }
@@ -530,7 +556,7 @@ mod tests {
         let a = mem.add("inbox", "A", "a");
         let id = card(&db, &mem, Action::Promote, &[&a]).await;
         assert_eq!(
-            retry(&db, &mem, "verified", id).await.unwrap(),
+            retry(&db, &mem, "inbox", "verified", id).await.unwrap(),
             ApplyResult::AlreadyHandled
         );
         assert_eq!(mem.writes.load(Ordering::SeqCst), 0);
@@ -547,7 +573,9 @@ mod tests {
         let gone = card(&db, &mem, Action::Promote, &[&c]).await;
         mem.set_raw(&b, raw_note(&b, "B", "edited"));
         mem.remove(&c);
-        let n = refresh(&db, &mem, &[fresh, edited, gone]).await.unwrap();
+        let n = refresh(&db, &mem, "inbox", &[fresh, edited, gone])
+            .await
+            .unwrap();
         assert_eq!(n, 2);
         assert_eq!(status(&db, fresh).await, Status::Ready);
         assert_eq!(status(&db, edited).await, Status::Stale);
@@ -569,13 +597,56 @@ mod tests {
             .await
             .unwrap();
         mem.remove(&a);
-        assert_eq!(refresh(&db, &mem, &[id]).await.unwrap(), 0);
+        assert_eq!(refresh(&db, &mem, "inbox", &[id]).await.unwrap(), 0);
         assert_eq!(status(&db, id).await, Status::Applying);
+    }
+
+    #[tokio::test]
+    async fn accept_with_source_moved_out_of_inbox_keeps_it() {
+        // The owner moved the file to verified/ by hand; Basic Memory kept the
+        // inbox permalink and the content is unchanged.
+        let (db, mem) = setup();
+        let a = mem.add("inbox", "A", "a");
+        let b = mem.add("inbox", "B", "b");
+        let id = card(&db, &mem, Action::Merge, &[&a, &b]).await;
+        mem.move_to(&b, "verified/ops");
+        assert_eq!(
+            accept(&db, &mem, "inbox", "verified", id).await.unwrap(),
+            ApplyResult::Stale
+        );
+        assert_eq!(status(&db, id).await, Status::Stale);
+        assert!(mem.raw(&b).is_some(), "hand-verified note must survive");
+        assert_eq!(
+            mem.writes.load(Ordering::SeqCst) + mem.deletes.load(Ordering::SeqCst),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_closes_card_whose_notes_all_left_inbox() {
+        let (db, mem) = setup();
+        let a = mem.add("inbox", "A", "a");
+        let id = card(&db, &mem, Action::Promote, &[&a]).await;
+        mem.move_to(&a, "verified/ops");
+        assert_eq!(refresh(&db, &mem, "inbox", &[id]).await.unwrap(), 1);
+        assert_eq!(status(&db, id).await, Status::Closed);
+    }
+
+    #[tokio::test]
+    async fn retry_does_not_delete_source_moved_meanwhile() {
+        let (db, mem) = setup();
+        let a = mem.add("inbox", "A", "a");
+        let id = card(&db, &mem, Action::Promote, &[&a]).await;
+        mem.fail_next.lock().unwrap().push("delete");
+        accept(&db, &mem, "inbox", "verified", id).await.unwrap();
+        mem.move_to(&a, "verified/manual");
+        retry(&db, &mem, "inbox", "verified", id).await.unwrap();
+        assert!(mem.raw(&a).is_some());
     }
 
     #[tokio::test]
     async fn unknown_card_is_error() {
         let (db, mem) = setup();
-        assert!(accept(&db, &mem, "verified", 42).await.is_err());
+        assert!(accept(&db, &mem, "inbox", "verified", 42).await.is_err());
     }
 }

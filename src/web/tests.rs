@@ -254,7 +254,10 @@ async fn card_fragment_vs_full_page() {
     assert!(!frag.contains("<html"));
     assert!(frag.contains("Final title"));
     // htmx wants the event filter right after the event name, before `from:`.
-    assert!(frag.contains("hx-trigger=\"mr:changed[window.mrCardIdle"), "{frag}");
+    assert!(
+        frag.contains("hx-trigger=\"mr:changed[window.mrCardIdle"),
+        "{frag}"
+    );
     let (_, page) = t.get(&format!("/p/{id}")).await;
     assert!(page.contains("<html"));
     assert!(page.contains("Final title"));

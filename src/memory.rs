@@ -50,6 +50,25 @@ pub trait MemoryApi: Send + Sync {
     async fn delete(&self, permalink: &str) -> anyhow::Result<bool>;
 }
 
+/// Permalinks of the notes physically inside `inbox_dir`.
+///
+/// A permalink alone does not say where a note lives: Basic Memory keeps the
+/// old permalink when a file is moved by hand (`update_permalinks_on_move` is
+/// off by default), so `inbox/...` may point at a note already in `verified/`.
+///
+/// cancel-safe: yes — read-only.
+pub async fn inbox_permalinks(
+    memory: &dyn MemoryApi,
+    inbox_dir: &str,
+) -> anyhow::Result<std::collections::HashSet<String>> {
+    Ok(memory
+        .list_dir(inbox_dir)
+        .await?
+        .into_iter()
+        .map(|e| e.permalink)
+        .collect())
+}
+
 /// [`MemoryApi`] backed by a Basic Memory MCP server.
 pub struct McpMemory {
     client: McpClient,
@@ -249,6 +268,9 @@ pub mod fake {
         pub delete_noop: AtomicBool,
         pub writes: AtomicUsize,
         pub deletes: AtomicUsize,
+        /// Notes moved by hand: permalink → folder the file now lives in.
+        /// Basic Memory keeps the old permalink on a move by default.
+        pub moved: Mutex<BTreeMap<String, String>>,
     }
 
     pub fn slug(title: &str) -> String {
@@ -285,6 +307,24 @@ pub mod fake {
                 .insert(permalink.to_string(), raw);
         }
 
+        /// Moves the file to `dir` without changing its permalink.
+        pub fn move_to(&self, permalink: &str, dir: &str) {
+            self.moved
+                .lock()
+                .unwrap()
+                .insert(permalink.to_string(), dir.to_string());
+        }
+
+        fn folder(&self, permalink: &str) -> String {
+            if let Some(d) = self.moved.lock().unwrap().get(permalink) {
+                return d.clone();
+            }
+            let rest = permalink.strip_prefix("p/").unwrap_or(permalink);
+            rest.rsplit_once('/')
+                .map(|(d, _)| d.to_string())
+                .unwrap_or_default()
+        }
+
         pub fn remove(&self, permalink: &str) {
             self.notes.lock().unwrap().remove(permalink);
         }
@@ -310,16 +350,10 @@ pub mod fake {
     impl MemoryApi for FakeMemory {
         async fn list_dir(&self, dir: &str) -> anyhow::Result<Vec<InboxEntry>> {
             self.maybe_fail("list_dir")?;
-            let prefix = format!("p/{dir}/");
-            Ok(self
-                .notes
-                .lock()
-                .unwrap()
+            let notes = self.notes.lock().unwrap().clone();
+            Ok(notes
                 .iter()
-                .filter(|(p, _)| {
-                    p.strip_prefix(&prefix)
-                        .is_some_and(|rest| !rest.contains('/'))
-                })
+                .filter(|(p, _)| self.folder(p) == dir)
                 .map(|(p, raw)| Self::entry(p, raw))
                 .collect())
         }
