@@ -1,5 +1,5 @@
 {% if let Some(c) = card %}
-<section id="card" class="card-pane" data-id="{{ c.id }}" hx-get="/p/{{ c.id }}" hx-trigger="mr:changed from:body[window.mrCardIdle &amp;&amp; mrCardIdle()]" hx-swap="outerHTML">
+<section id="card" class="card-pane" data-id="{{ c.id }}" hx-get="/p/{{ c.id }}" hx-trigger="mr:changed[window.mrCardIdle &amp;&amp; mrCardIdle()] from:body" hx-swap="outerHTML">
 <div class="card">
   <div class="card-head">
     <a class="btn back" href="/" data-back>← {{ t.back }}</a>
