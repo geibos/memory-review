@@ -1,0 +1,104 @@
+//! Interface strings. One table per language, generated from a single list so
+//! a string can never exist in one language and be missing in the other.
+
+use crate::config::Lang;
+
+macro_rules! strings {
+    ($($field:ident: $en:expr, $ru:expr;)*) => {
+        #[derive(Debug)]
+        pub struct Strings {
+            $(pub $field: &'static str,)*
+        }
+
+        const EN: Strings = Strings { $($field: $en,)* };
+        const RU: Strings = Strings { $($field: $ru,)* };
+
+        impl Strings {
+            /// All `(name, value)` pairs, for tests.
+            #[cfg(test)]
+            fn entries(&self) -> Vec<(&'static str, &'static str)> {
+                vec![$((stringify!($field), self.$field),)*]
+            }
+        }
+    };
+}
+
+strings! {
+    html_lang: "en", "ru";
+    app_title: "Memory review", "Разбор памяти";
+    pill_inbox: "inbox", "inbox";
+    pill_review: "to review", "к ревью";
+    pill_agent: "with agent", "у агента";
+    triage_new: "Triage new", "Разобрать новые";
+    theme_toggle: "Toggle theme", "Сменить тему";
+    filter_open: "Open", "Открытые";
+    filter_all: "All", "Все";
+    back: "Back", "Назад";
+    empty_queue: "Nothing to review. Press “Triage new” when the inbox has notes.", "Разбирать нечего. Нажмите «Разобрать новые», когда в inbox появятся заметки.";
+    empty_card: "Select a card on the left.", "Выберите карточку слева.";
+    badge_promote: "to verified", "в verified";
+    badge_merge: "merge", "слить";
+    badge_delete: "delete", "удалить";
+    badge_agent: "with agent", "у агента";
+    badge_snoozed: "snoozed", "отложено";
+    badge_stale: "source changed", "исходник изменился";
+    badge_closed: "closed", "закрыто";
+    badge_applying: "applying", "применяется";
+    badge_accepted: "accepted", "принято";
+    tab_diff: "Diff", "Дифф";
+    tab_draft: "Draft", "Чистовик";
+    tab_sources: "Sources", "Исходники";
+    no_draft: "Nothing will be written to verified: the sources are deleted.", "В verified ничего не пишется: исходники удаляются.";
+    agent_says: "agent", "агент";
+    you_say: "you", "ты";
+    system_says: "system", "система";
+    draft_version: "draft v", "чистовик v";
+    unsent: "not sent yet", "ещё не отправлено";
+    comment_placeholder: "Comment for the agent…", "Комментарий для агента…";
+    add_comment: "Comment", "Комментировать";
+    send_to_agent: "Send to agent", "Отправить агенту";
+    accept: "Accept", "Принять";
+    accept_again: "Press again to accept", "Нажмите ещё раз";
+    snooze: "Snooze", "Отложить";
+    regenerate: "Regenerate", "Перегенерировать";
+    retry: "Retry", "Повторить";
+    agent_working: "The agent is working on this card…", "Агент работает над карточкой…";
+    stale_hint: "A source note changed after the draft was made. Regenerate to refresh the proposal.", "Исходная заметка изменилась после подготовки чистовика. Перегенерируйте предложение.";
+    closed_hint: "All source notes are gone from the inbox.", "Все исходные заметки исчезли из inbox.";
+    applying_hint: "Applying stopped half-way. Retry is safe: finished steps are skipped.", "Применение остановилось на полпути. Повтор безопасен: сделанные шаги пропускаются.";
+    accepted_hint: "Accepted and written to memory.", "Принято и записано в память.";
+    snoozed_until: "Snoozed until", "Отложено до";
+    result_stale: "Not applied: a source changed.", "Не применено: исходник изменился.";
+    result_already: "This card was already handled.", "Карточка уже обработана.";
+    keys_hint: "J/K move · A accept · S snooze · C comment · ⌘↵ send", "J/K — навигация · A — принять · S — отложить · C — комментарий · ⌘↵ — отправить";
+    queued: "queued", "в очереди";
+    sources_n: "sources", "источников";
+}
+
+pub fn strings(lang: Lang) -> &'static Strings {
+    match lang {
+        Lang::En => &EN,
+        Lang::Ru => &RU,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ru_and_en_have_no_empty_strings() {
+        for lang in [Lang::En, Lang::Ru] {
+            for (name, value) in strings(lang).entries() {
+                assert!(!value.trim().is_empty(), "{lang:?}.{name} is empty");
+            }
+        }
+    }
+
+    #[test]
+    fn languages_differ_where_expected() {
+        assert_eq!(strings(Lang::Ru).accept, "Принять");
+        assert_eq!(strings(Lang::En).accept, "Accept");
+        assert_eq!(strings(Lang::Ru).html_lang, "ru");
+    }
+}
