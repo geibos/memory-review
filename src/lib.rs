@@ -1,5 +1,6 @@
 //! memory-review: a review queue for an AI agents' shared memory inbox.
 
 pub mod config;
+pub mod domain;
 pub mod i18n;
 pub mod note;
