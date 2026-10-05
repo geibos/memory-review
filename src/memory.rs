@@ -142,6 +142,11 @@ impl MemoryApi for McpMemory {
             )
             .await?;
         if r.is_error {
+            // Basic Memory reports a missing note either like this or with a
+            // fuzzy match (handled below); any other error is a real failure.
+            if r.text.starts_with("Resource not found") {
+                return Ok(None);
+            }
             anyhow::bail!(
                 "read_content failed: {}",
                 r.text.chars().take(300).collect::<String>()
