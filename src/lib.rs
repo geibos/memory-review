@@ -4,4 +4,6 @@ pub mod config;
 pub mod db;
 pub mod domain;
 pub mod i18n;
+pub mod mcp;
+pub mod memory;
 pub mod note;
