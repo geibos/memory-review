@@ -100,7 +100,6 @@ impl Llm for LiteLlm {
                 "name": tool.name, "description": tool.description, "parameters": tool.parameters,
             }}],
             "tool_choice": "auto",
-            "temperature": 0.2,
             "max_tokens": 8000,
         });
         let url = format!("{}/v1/chat/completions", self.url);
@@ -282,6 +281,8 @@ mod tests {
         assert_eq!(body["tool_choice"], "auto");
         assert_eq!(body["model"], "m");
         assert_eq!(body["tools"][0]["function"]["name"], "submit");
+        // Some models behind LiteLLM reject any temperature other than their default.
+        assert!(body.get("temperature").is_none(), "{body}");
         assert_eq!(body["messages"][0]["content"], "hi");
     }
 
