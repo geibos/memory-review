@@ -426,6 +426,18 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_exact_not_found_error_is_none() {
+        // After a delete Basic Memory answers with an error instead of a fuzzy match.
+        let (url, _stub) = test_server::start(|_, args| {
+            json!({"__is_error": true,
+                   "__raw_text": format!("Resource not found: {}", args["path"].as_str().unwrap())})
+        })
+        .await;
+        let m = McpMemory::new(url, "proj".into());
+        assert!(m.read_exact("proj/inbox/gone").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
     async fn read_exact_tool_error_is_error() {
         let (url, _stub) =
             test_server::start(|_, _| json!({"__is_error": true, "__raw_text": "db locked"})).await;
