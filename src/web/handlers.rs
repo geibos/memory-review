@@ -155,15 +155,38 @@ async fn status_of(s: &AppState, id: i64) -> Result<Option<Status>> {
         .map(|p| p.status))
 }
 
-/// Starts an agent job for a card already moved to `agent_working`; undoes
-/// the move if the queue refuses the job.
-async fn start_job(s: &AppState, id: i64, job: Job, back_to: Status) -> Result<Option<String>> {
-    if s.agent.enqueue(job) {
-        return Ok(None);
-    }
-    s.db.call(move |c| db::advance(c, id, Status::AgentWorking, &Event::AgentFailed { back_to }))
+/// Moves a card to `agent_working` and queues its job, as one unit.
+///
+/// cancel-safe: yes — the work runs in its own task, so a client that goes
+/// away between the status change and the enqueue cannot strand the card in
+/// `agent_working` with no job. Undoes the move if the queue refuses the job.
+async fn hand_to_agent(
+    s: &AppState,
+    id: i64,
+    from: Status,
+    ev: Event,
+    job: Job,
+) -> Result<Option<String>> {
+    let s = s.clone();
+    let task = tokio::spawn(async move {
+        if !s.db.call(move |c| db::advance(c, id, from, &ev)).await? {
+            return anyhow::Ok(None);
+        }
+        if s.agent.enqueue(job) {
+            return Ok(None);
+        }
+        s.db.call(move |c| {
+            db::advance(
+                c,
+                id,
+                Status::AgentWorking,
+                &Event::AgentFailed { back_to: from },
+            )
+        })
         .await?;
-    Ok(Some(s.t.queue_full.to_string()))
+        Ok(Some(s.t.queue_full.to_string()))
+    });
+    Ok(task.await??)
 }
 
 #[derive(Deserialize)]
@@ -193,12 +216,9 @@ pub async fn comment(
     let mut notice = None;
     if f.send == "1" {
         let pending = s.db.call(move |c| db::pending_human(c, id)).await?;
-        if !pending.is_empty()
-            && s.db
-                .call(move |c| db::advance(c, id, Status::Ready, &Event::SendToAgent))
-                .await?
-        {
-            notice = start_job(&s, id, Job::Reply { id }, Status::Ready).await?;
+        if !pending.is_empty() {
+            notice =
+                hand_to_agent(&s, id, Status::Ready, Event::SendToAgent, Job::Reply { id }).await?;
         }
     }
     card_response(&s, load_card(&s, id, notice).await?)
@@ -249,12 +269,13 @@ pub async fn snooze(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Re
 }
 
 pub async fn regenerate(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Response> {
-    let mut notice = None;
-    if s.db
-        .call(move |c| db::advance(c, id, Status::Stale, &Event::Regenerate))
-        .await?
-    {
-        notice = start_job(&s, id, Job::Regenerate { id }, Status::Stale).await?;
-    }
+    let notice = hand_to_agent(
+        &s,
+        id,
+        Status::Stale,
+        Event::Regenerate,
+        Job::Regenerate { id },
+    )
+    .await?;
     card_response(&s, load_card(&s, id, notice).await?)
 }
