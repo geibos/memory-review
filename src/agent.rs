@@ -180,7 +180,8 @@ fn reply_tool() -> ToolSpec {
                 "target_dir": { "type": "string" },
                 "target_title": { "type": "string" },
                 "draft": { "type": "string" },
-                "tags": { "type": "array", "items": { "type": "string" } }
+                "tags": { "type": "array", "items": { "type": "string" } },
+                "rationale": { "type": "string", "description": "Updated 1-3 sentence rationale when the proposal changes." }
             },
             "required": ["reply"]
         }),
@@ -202,6 +203,8 @@ struct ReplyArgs {
     draft: Option<String>,
     #[serde(default)]
     tags: Option<Vec<String>>,
+    #[serde(default)]
+    rationale: Option<String>,
 }
 
 impl ReplyArgs {
@@ -212,6 +215,7 @@ impl ReplyArgs {
             || self.target_title.is_some()
             || self.draft.is_some()
             || self.tags.is_some()
+            || self.rationale.is_some()
     }
 }
 
@@ -638,7 +642,10 @@ impl Agent {
                     target_title: r.target_title.clone().or_else(|| card.target_title.clone()),
                     draft: r.draft.clone().or_else(|| card.draft.clone()),
                     tags: r.tags.clone().or_else(|| Some(card.tags.clone())),
-                    rationale: card.rationale.clone(),
+                    rationale: r
+                        .rationale
+                        .clone()
+                        .unwrap_or_else(|| card.rationale.clone()),
                 };
                 let v = p.validate(&ClaimContext {
                     origin: &origin,
@@ -984,6 +991,26 @@ mod tests {
             w.llm.seen.lock().unwrap()[1][1]
                 .content
                 .contains("Put it under ops")
+        );
+    }
+
+    #[tokio::test]
+    async fn reply_can_update_rationale() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "Drop the numbers").await;
+        w.set_working(id, Status::Ready).await;
+        w.llm
+            .push_tool(json!({"reply": "Done.", "draft": "- [fact] no numbers",
+                               "rationale": "Numbers removed at the reviewer's request."}));
+        w.agent().reply(id).await.unwrap();
+        assert_eq!(
+            w.card(id).await.rationale,
+            "Numbers removed at the reviewer's request."
         );
     }
 
