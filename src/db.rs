@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::domain::{Action, Status, ValidatedProposal};
+use crate::domain::{Action, Event, Status, ValidatedProposal, transition};
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -493,6 +493,50 @@ pub fn mark_sent(c: &Connection, id: i64) -> anyhow::Result<Vec<MessageRow>> {
     Ok(pending)
 }
 
+/// Moves a card along the lifecycle if it is still in `from`.
+pub fn advance(c: &Connection, id: i64, from: Status, ev: &Event) -> anyhow::Result<bool> {
+    let to = transition(from, ev)?;
+    cas_status(c, id, from, to)
+}
+
+/// Unsent human messages, oldest first, without changing them.
+pub fn pending_human(c: &Connection, id: i64) -> anyhow::Result<Vec<MessageRow>> {
+    message_rows(
+        c,
+        "SELECT id, author, body, draft_version, sent, created_at FROM messages
+         WHERE proposal_id = ?1 AND sent = 0 AND author = 'human' ORDER BY id",
+        id,
+    )
+}
+
+pub fn mark_sent_ids(c: &Connection, ids: &[i64]) -> anyhow::Result<()> {
+    let mut stmt = c.prepare("UPDATE messages SET sent = 1 WHERE id = ?1")?;
+    for id in ids {
+        stmt.execute(params![id])?;
+    }
+    Ok(())
+}
+
+/// Cards left in `agent_working` by a previous process; returns them to `ready`.
+pub fn reset_interrupted(c: &Connection) -> anyhow::Result<Vec<i64>> {
+    let ids: Vec<i64> = {
+        let mut stmt = c.prepare("SELECT id FROM proposals WHERE status = 'agent_working'")?;
+        stmt.query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?
+    };
+    for id in &ids {
+        cas_status(c, *id, Status::AgentWorking, Status::Ready)?;
+        add_message(
+            c,
+            *id,
+            "system",
+            "The agent run was interrupted by a service restart. Send again if you still need an answer.",
+            true,
+        )?;
+    }
+    Ok(ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,5 +840,67 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
+    }
+
+    #[tokio::test]
+    async fn advance_follows_domain_table() {
+        let db = Db::open_in_memory().unwrap();
+        let id = insert(&db, &["p/inbox/a"]).await;
+        assert!(
+            db.call(move |c| advance(c, id, Status::Ready, &Event::Accept))
+                .await
+                .unwrap()
+        );
+        // Not in `ready` any more: no-op.
+        assert!(
+            !db.call(move |c| advance(c, id, Status::Ready, &Event::Accept))
+                .await
+                .unwrap()
+        );
+        // Illegal transition is an error, not a silent false.
+        assert!(
+            db.call(move |c| advance(c, id, Status::Applying, &Event::Snooze))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn pending_then_mark_by_ids_keeps_later_comments() {
+        let db = Db::open_in_memory().unwrap();
+        let id = insert(&db, &["p/inbox/a"]).await;
+        db.call(move |c| add_message(c, id, "human", "first", false))
+            .await
+            .unwrap();
+        let seen = db.call(move |c| pending_human(c, id)).await.unwrap();
+        assert_eq!(seen.len(), 1);
+        // A comment arrives while the agent works on `seen`.
+        db.call(move |c| add_message(c, id, "human", "later", false))
+            .await
+            .unwrap();
+        let ids: Vec<i64> = seen.iter().map(|m| m.id).collect();
+        db.call(move |c| mark_sent_ids(c, &ids)).await.unwrap();
+        let left = db.call(move |c| pending_human(c, id)).await.unwrap();
+        assert_eq!(
+            left.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(),
+            ["later"]
+        );
+    }
+
+    #[tokio::test]
+    async fn reset_interrupted_returns_cards_to_ready_with_note() {
+        let db = Db::open_in_memory().unwrap();
+        let a = insert(&db, &["p/inbox/a"]).await;
+        let b = insert(&db, &["p/inbox/b"]).await;
+        db.call(move |c| cas_status(c, a, Status::Ready, Status::AgentWorking))
+            .await
+            .unwrap();
+        let ids = db.call(|c| reset_interrupted(c)).await.unwrap();
+        assert_eq!(ids, [a]);
+        let p = db.call(move |c| get_proposal(c, a)).await.unwrap().unwrap();
+        assert_eq!(p.status, Status::Ready);
+        let m = db.call(move |c| messages(c, a)).await.unwrap();
+        assert_eq!(m.last().unwrap().author, "system");
+        assert!(db.call(move |c| messages(c, b)).await.unwrap().is_empty());
     }
 }

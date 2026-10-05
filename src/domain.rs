@@ -105,7 +105,7 @@ pub fn transition(from: Status, ev: &Event) -> Result<Status, DomainError> {
         (Ready, Event::Snooze) => Some(Snoozed),
         (Snoozed, Event::Unsnooze) => Some(Ready),
         (Ready | Snoozed, Event::SourcesChanged) => Some(Stale),
-        (Ready | Snoozed | Stale, Event::SourcesGone) => Some(Closed),
+        (Ready | Snoozed | Stale | AgentWorking, Event::SourcesGone) => Some(Closed),
         _ => None,
     };
     to.ok_or_else(|| DomainError {
@@ -354,6 +354,14 @@ mod tests {
         );
         assert!(transition(Status::Applying, &Event::SourcesChanged).is_err());
         assert!(transition(Status::Accepted, &Event::SourcesGone).is_err());
+    }
+
+    #[test]
+    fn regeneration_with_no_sources_left_closes() {
+        assert_eq!(
+            transition(Status::AgentWorking, &Event::SourcesGone).unwrap(),
+            Status::Closed
+        );
     }
 
     #[test]
