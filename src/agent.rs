@@ -616,7 +616,18 @@ impl Agent {
                     return Ok((r.reply, None));
                 }
                 let sources = r.sources.clone().unwrap_or_else(|| current_sources.clone());
-                let origin = sources.first().cloned().unwrap_or_default();
+                // A revision may add or drop notes but must stay about this card:
+                // at least one current note remains, and it anchors validation.
+                let origin = sources
+                    .iter()
+                    .find(|s| current_sources.contains(s))
+                    .cloned()
+                    .ok_or_else(|| {
+                        format!(
+                            "`sources` must keep at least one of the card's current notes: {}",
+                            current_sources.join(", ")
+                        )
+                    })?;
                 let p = AgentProposal {
                     action: r
                         .action
@@ -990,6 +1001,31 @@ mod tests {
             .push_tool(json!({"reply": "Because it is about servers."}));
         w.agent().reply(id).await.unwrap();
         assert_eq!(w.card(id).await.version, 1);
+    }
+
+    #[tokio::test]
+    async fn reply_cannot_swap_out_all_sources() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        let b = w.mem.add("inbox", "B", "- [fact] unrelated");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "ok?").await;
+        w.set_working(id, Status::Ready).await;
+        let swap = json!({"reply": "Switched.", "action": "delete", "sources": [b]});
+        w.llm.push_tool(swap.clone());
+        w.llm.push_tool(swap);
+        w.agent().reply(id).await.unwrap();
+        let src = w.sources(id).await;
+        assert_eq!(
+            src.iter().map(|s| s.permalink.clone()).collect::<Vec<_>>(),
+            std::slice::from_ref(&a)
+        );
+        assert_eq!(w.card(id).await.action, Action::Promote);
+        assert!(!w.claimed().await.contains(&b));
+        assert_eq!(w.thread(id).await.last().unwrap().author, "system");
     }
 
     #[tokio::test]
