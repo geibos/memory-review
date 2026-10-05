@@ -399,11 +399,10 @@ mod tests {
             mem.raw(&a).is_some(),
             "source kept when the write did not land"
         );
-        assert_eq!(
+        assert!(
             mem.raw("p/verified/ops/final")
                 .unwrap()
-                .contains("something else"),
-            true
+                .contains("something else")
         );
         let p = db
             .call(move |c| db::get_proposal(c, id))
