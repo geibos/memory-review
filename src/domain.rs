@@ -75,10 +75,16 @@ pub enum Event {
     SendToAgent,
     Regenerate,
     AgentDone,
-    AgentFailed { back_to: Status },
+    AgentFailed {
+        back_to: Status,
+    },
     Accept,
     ApplyDone,
     ApplyRetry,
+    /// Applying hit something a retry cannot fix; the card goes back for review.
+    ApplyBlocked {
+        back_to: Status,
+    },
     Snooze,
     Unsnooze,
     SourcesChanged,
@@ -102,6 +108,9 @@ pub fn transition(from: Status, ev: &Event) -> Result<Status, DomainError> {
         }
         (Ready, Event::Accept) | (Applying, Event::ApplyRetry) => Some(Applying),
         (Applying, Event::ApplyDone) => Some(Accepted),
+        (Applying, Event::ApplyBlocked { back_to }) => {
+            matches!(back_to, Ready | Stale).then_some(*back_to)
+        }
         (Ready, Event::Snooze) => Some(Snoozed),
         (Snoozed, Event::Unsnooze) => Some(Ready),
         (Ready | Snoozed, Event::SourcesChanged) => Some(Stale),
@@ -326,6 +335,39 @@ mod tests {
         assert_eq!(
             transition(Status::Applying, &Event::ApplyRetry).unwrap(),
             Status::Applying
+        );
+    }
+
+    #[test]
+    fn blocked_apply_leaves_applying() {
+        assert_eq!(
+            transition(
+                Status::Applying,
+                &Event::ApplyBlocked {
+                    back_to: Status::Ready
+                }
+            )
+            .unwrap(),
+            Status::Ready
+        );
+        assert_eq!(
+            transition(
+                Status::Applying,
+                &Event::ApplyBlocked {
+                    back_to: Status::Stale
+                }
+            )
+            .unwrap(),
+            Status::Stale
+        );
+        assert!(
+            transition(
+                Status::Applying,
+                &Event::ApplyBlocked {
+                    back_to: Status::Accepted
+                }
+            )
+            .is_err()
         );
     }
 

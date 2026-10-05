@@ -136,6 +136,18 @@ pub async fn refresh(
     Ok(changed)
 }
 
+/// A failure that retrying cannot fix: the card leaves `applying` for review.
+#[derive(Debug, thiserror::Error)]
+#[error("{msg}")]
+struct Blocked {
+    back_to: Status,
+    msg: String,
+}
+
+fn blocked(back_to: Status, msg: String) -> anyhow::Error {
+    Blocked { back_to, msg }.into()
+}
+
 async fn load(db: &Db, id: i64) -> anyhow::Result<db::ProposalRow> {
     db.call(move |c| db::get_proposal(c, id))
         .await?
@@ -161,10 +173,13 @@ async fn run(
         for r in &rows {
             if !inbox.contains(&r.permalink) {
                 if memory.read_exact(&r.permalink).await?.is_some() {
-                    anyhow::bail!(
-                        "{} is no longer in the inbox (moved by hand?); it was not deleted",
-                        r.permalink
-                    );
+                    return Err(blocked(
+                        Status::Stale,
+                        format!(
+                            "{} is no longer in the inbox (moved by hand?); it was not deleted",
+                            r.permalink
+                        ),
+                    ));
                 }
                 continue; // already deleted
             }
@@ -172,10 +187,13 @@ async fn run(
                 continue; // already deleted
             };
             if content_hash(&current.raw) != r.content_hash {
-                anyhow::bail!(
-                    "{} was edited after the card was accepted; it was not deleted",
-                    r.permalink
-                );
+                return Err(blocked(
+                    Status::Stale,
+                    format!(
+                        "{} was edited after the card was accepted; it was not deleted",
+                        r.permalink
+                    ),
+                ));
             }
             memory.delete(&r.permalink).await?;
             if memory.read_exact(&r.permalink).await?.is_some() {
@@ -198,8 +216,15 @@ async fn run(
         Err(e) => {
             let msg = format!("{e:#}");
             let stored = msg.clone();
-            db.call(move |c| db::set_error(c, id, Some(&stored)))
-                .await?;
+            let back_to = e.downcast_ref::<Blocked>().map(|b| b.back_to);
+            db.call(move |c| {
+                db::set_error(c, id, Some(&stored))?;
+                if let Some(back_to) = back_to {
+                    db::advance(c, id, Status::Applying, &Event::ApplyBlocked { back_to })?;
+                }
+                Ok(())
+            })
+            .await?;
             Ok(ApplyResult::Failed(msg))
         }
     }
@@ -239,9 +264,14 @@ async fn ensure_written(
             };
             match existing {
                 Some(e) if same => e.permalink,
-                _ => anyhow::bail!(
-                    "name conflict: a different note titled “{title}” already exists in {folder}; rename the target in a comment"
-                ),
+                _ => {
+                    return Err(blocked(
+                        Status::Ready,
+                        format!(
+                            "name conflict: a different note titled “{title}” already exists in {folder}; ask the agent to rename the target"
+                        ),
+                    ));
+                }
             }
         }
     };
@@ -462,7 +492,8 @@ mod tests {
             matches!(&r, ApplyResult::Failed(e) if e.contains("Final")),
             "{r:?}"
         );
-        assert_eq!(status(&db, id).await, Status::Applying);
+        // Nothing was written: the card goes back for review with the error shown.
+        assert_eq!(status(&db, id).await, Status::Ready);
         assert!(
             mem.raw(&a).is_some(),
             "source kept when the write did not land"
@@ -548,6 +579,11 @@ mod tests {
         let r = retry(&db, &mem, "inbox", "verified", id).await.unwrap();
         assert!(matches!(r, ApplyResult::Failed(_)), "{r:?}");
         assert!(mem.raw(&a).unwrap().contains("new knowledge"));
+        assert_eq!(
+            status(&db, id).await,
+            Status::Stale,
+            "regenerate must be possible"
+        );
     }
 
     #[tokio::test]
@@ -642,6 +678,7 @@ mod tests {
         mem.move_to(&a, "verified/manual");
         retry(&db, &mem, "inbox", "verified", id).await.unwrap();
         assert!(mem.raw(&a).is_some());
+        assert_eq!(status(&db, id).await, Status::Stale);
     }
 
     #[tokio::test]

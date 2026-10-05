@@ -244,6 +244,7 @@ pub fn update_draft(
     let n = tx.execute(
         "UPDATE proposals SET action = ?2, target_dir = ?3, target_title = ?4, draft = ?5,
                 tags = ?6, rationale = ?7, version = version + 1, applied_permalink = NULL,
+                error = NULL,
                 updated_at = ?8
          WHERE id = ?1",
         params![
@@ -666,6 +667,27 @@ mod tests {
                 .await
                 .unwrap()
                 .contains("p/inbox/b")
+        );
+    }
+
+    #[tokio::test]
+    async fn update_draft_clears_error() {
+        let db = Db::open_in_memory().unwrap();
+        let id = insert(&db, &["p/inbox/a"]).await;
+        db.call(move |c| set_error(c, id, Some("name conflict")))
+            .await
+            .unwrap();
+        let n = np(&["p/inbox/a"]);
+        db.call(move |c| update_draft(c, id, &n.v, &n.sources))
+            .await
+            .unwrap();
+        assert!(
+            db.call(move |c| get_proposal(c, id))
+                .await
+                .unwrap()
+                .unwrap()
+                .error
+                .is_none()
         );
     }
 
