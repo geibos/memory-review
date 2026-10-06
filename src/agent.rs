@@ -19,9 +19,19 @@ use crate::prompts::{Prompts, render};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Job {
-    Triage { permalink: String },
-    Reply { id: i64 },
-    Regenerate { id: i64 },
+    Triage {
+        permalink: String,
+    },
+    Reply {
+        id: i64,
+    },
+    /// Rebuild the proposal from the live sources with `model` (or the
+    /// current one); on failure the card goes back to `back_to`.
+    Regenerate {
+        id: i64,
+        model: Option<String>,
+        back_to: Status,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -297,7 +307,7 @@ impl Agent {
             while let Some(job) = rx.recv().await {
                 let label = match &job {
                     Job::Triage { permalink } => permalink.clone(),
-                    Job::Reply { id } | Job::Regenerate { id } => format!("card #{id}"),
+                    Job::Reply { id } | Job::Regenerate { id, .. } => format!("card #{id}"),
                 };
                 lock(&state).current = Some(label.clone());
                 let _ = events.send(AgentEvent::Started(label.clone()));
@@ -308,7 +318,9 @@ impl Agent {
                     match &j {
                         Job::Triage { permalink } => a.triage(permalink).await.map(|_| ()),
                         Job::Reply { id } => a.reply(*id).await,
-                        Job::Regenerate { id } => a.regenerate(*id).await,
+                        Job::Regenerate { id, model, back_to } => {
+                            a.regenerate(*id, model.clone(), *back_to).await
+                        }
                     }
                 })
                 .await
@@ -338,14 +350,11 @@ impl Agent {
         &self,
         mut messages: Vec<ChatMessage>,
         tool: &ToolSpec,
+        model: &str,
         check: impl Fn(Value) -> Result<T, String>,
     ) -> anyhow::Result<T> {
         for attempt in 0..2 {
-            let (said, problem) = match self
-                .llm
-                .call_tool(&messages, tool, &self.llm.model())
-                .await?
-            {
+            let (said, problem) = match self.llm.call_tool(&messages, tool, model).await? {
                 LlmOutcome::ToolCall(v) => match check(v.clone()) {
                     Ok(t) => return Ok(t),
                     Err(e) => (v.to_string(), e),
@@ -447,7 +456,11 @@ impl Agent {
     }
 
     /// Asks for a proposal about `ctx.origin` and returns it with its source rows.
-    async fn propose(&self, ctx: &Context) -> anyhow::Result<(ValidatedProposal, Vec<SourceRow>)> {
+    async fn propose(
+        &self,
+        ctx: &Context,
+        model: &str,
+    ) -> anyhow::Result<(ValidatedProposal, Vec<SourceRow>)> {
         let user = render(
             &self.prompts.triage,
             &[
@@ -466,7 +479,7 @@ impl Agent {
         let free = ctx.free();
         let origin = ctx.origin.permalink.clone();
         let v = self
-            .ask(messages, &proposal_tool(), |args| {
+            .ask(messages, &proposal_tool(), model, |args| {
                 serde_json::from_value::<AgentProposal>(args)
                     .map_err(|e| format!("arguments do not match the schema: {e}"))?
                     .validate(&ClaimContext {
@@ -494,7 +507,7 @@ impl Agent {
             return Ok(TriageResult::SkippedMissing);
         };
         let ctx = self.gather(origin, Vec::new()).await?;
-        let (v, sources) = self.propose(&ctx).await?;
+        let (v, sources) = self.propose(&ctx, &self.llm.model()).await?;
         match self
             .db
             .call(move |c| db::insert_proposal(c, &db::NewProposal { v, sources }))
@@ -551,6 +564,8 @@ impl Agent {
         card: &db::ProposalRow,
         pending: &[db::MessageRow],
     ) -> anyhow::Result<()> {
+        // The model is fixed for the whole answer and recorded with it.
+        let model = self.llm.model();
         let id = card.id;
         let rows = self.db.call(move |c| db::sources(c, id)).await?;
         let inbox = inbox_permalinks(self.memory.as_ref(), &self.cfg.inbox_dir).await?;
@@ -675,7 +690,7 @@ impl Agent {
         free.extend(live.iter().map(|n| n.permalink.clone()));
         let current_sources: Vec<String> = live.iter().map(|n| n.permalink.clone()).collect();
         let (reply, revised) = self
-            .ask(messages, &reply_tool(), |args| {
+            .ask(messages, &reply_tool(), &model, |args| {
                 let r: ReplyArgs = serde_json::from_value(args)
                     .map_err(|e| format!("arguments do not match the schema: {e}"))?;
                 if r.reply.trim().is_empty() {
@@ -752,7 +767,6 @@ impl Agent {
                 .call(move |c| db::update_draft(c, id, &v, &new_rows, bump))
                 .await?;
         }
-        let model = self.llm.model();
         self.db
             .call(move |c| {
                 db::mark_sent_ids(c, &pending_ids)?;
@@ -765,7 +779,13 @@ impl Agent {
     /// Rebuilds the proposal of a card in `agent_working` from its live sources.
     ///
     /// cancel-safe: NO — same reasoning as [`Agent::reply`].
-    pub async fn regenerate(&self, id: i64) -> anyhow::Result<()> {
+    pub async fn regenerate(
+        &self,
+        id: i64,
+        model: Option<String>,
+        back_to: Status,
+    ) -> anyhow::Result<()> {
+        let model = model.unwrap_or_else(|| self.llm.model());
         let rows = self.db.call(move |c| db::sources(c, id)).await?;
         let inbox = inbox_permalinks(self.memory.as_ref(), &self.cfg.inbox_dir).await?;
         let mut live: Vec<RawNote> = Vec::new();
@@ -793,7 +813,7 @@ impl Agent {
         let origin = live.remove(0);
         let outcome = async {
             let ctx = self.gather(origin, live).await?;
-            let (v, sources) = self.propose(&ctx).await?;
+            let (v, sources) = self.propose(&ctx, &model).await?;
             self.db
                 .call(move |c| db::update_draft(c, id, &v, &sources, true))
                 .await
@@ -801,19 +821,17 @@ impl Agent {
         .await;
         let (note, ev) = match outcome {
             Ok(()) => (
-                "Proposal regenerated from the current source notes.".to_string(),
+                format!("Proposal regenerated by {model} from the current source notes."),
                 Event::AgentDone,
             ),
             Err(e) => (
                 format!("The agent could not regenerate the proposal: {e:#}"),
-                Event::AgentFailed {
-                    back_to: Status::Stale,
-                },
+                Event::AgentFailed { back_to },
             ),
         };
         self.db
             .call(move |c| {
-                db::add_message(c, id, "system", &note, true)?;
+                db::add_message_ext(c, id, "system", &note, true, None, Some(&model))?;
                 db::advance(c, id, Status::AgentWorking, &ev)
             })
             .await?;
@@ -1190,7 +1208,7 @@ mod tests {
             .unwrap();
         w.set_working(id, Status::Stale).await;
         w.llm.push_tool(promote(&a));
-        w.agent().regenerate(id).await.unwrap();
+        w.agent().regenerate(id, None, Status::Stale).await.unwrap();
         let card = w.card(id).await;
         assert_eq!(card.status, Status::Ready);
         assert_eq!(card.version, 2);
@@ -1208,7 +1226,7 @@ mod tests {
             .await
             .unwrap();
         w.set_working(id, Status::Stale).await;
-        w.agent().regenerate(id).await.unwrap();
+        w.agent().regenerate(id, None, Status::Stale).await.unwrap();
         assert_eq!(w.card(id).await.status, Status::Closed);
         assert!(w.claimed().await.is_empty());
     }
@@ -1227,7 +1245,7 @@ mod tests {
         w.set_working(id, Status::Stale).await;
         w.llm.push_text("x");
         w.llm.push_text("y");
-        w.agent().regenerate(id).await.unwrap();
+        w.agent().regenerate(id, None, Status::Stale).await.unwrap();
         assert_eq!(w.card(id).await.status, Status::Stale);
         assert_eq!(w.thread(id).await.last().unwrap().author, "system");
     }
@@ -1529,6 +1547,55 @@ mod tests {
         assert_eq!(
             card.version, 2,
             "a tab showing the promote must not accept the delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn reprocess_ready_card_with_another_model() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.set_working(id, Status::Ready).await;
+        let mut p = promote(&a);
+        p["target_dir"] = json!("better");
+        w.llm.push_tool(p);
+        w.agent()
+            .regenerate(id, Some("other-model".into()), Status::Ready)
+            .await
+            .unwrap();
+        let card = w.card(id).await;
+        assert_eq!(card.status, Status::Ready);
+        assert_eq!(card.version, 2);
+        assert_eq!(card.target_dir.as_deref(), Some("better"));
+        assert_eq!(
+            w.llm.models.lock().unwrap().last().map(String::as_str),
+            Some("other-model")
+        );
+        let note = w.thread(id).await.pop().unwrap();
+        assert_eq!(note.author, "system");
+        assert_eq!(note.model.as_deref(), Some("other-model"));
+        assert!(note.body.contains("other-model"), "{}", note.body);
+    }
+
+    #[tokio::test]
+    async fn reprocess_failure_returns_to_given_status() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.set_working(id, Status::Ready).await;
+        w.llm.push_text("x");
+        w.llm.push_text("y");
+        w.agent().regenerate(id, None, Status::Ready).await.unwrap();
+        assert_eq!(w.card(id).await.status, Status::Ready);
+        assert_eq!(
+            w.llm.models.lock().unwrap().last().map(String::as_str),
+            Some("fake-model")
         );
     }
 }

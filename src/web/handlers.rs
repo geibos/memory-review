@@ -334,7 +334,11 @@ pub async fn regenerate(State(s): State<AppState>, Path(id): Path<i64>) -> Resul
         id,
         Status::Stale,
         Event::Regenerate,
-        Job::Regenerate { id },
+        Job::Regenerate {
+            id,
+            model: None,
+            back_to: Status::Stale,
+        },
     )
     .await?;
     card_response(&s, load_card(&s, id, notice).await?)

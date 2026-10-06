@@ -101,7 +101,9 @@ pub struct DomainError {
 pub fn transition(from: Status, ev: &Event) -> Result<Status, DomainError> {
     use Status::*;
     let to = match (from, ev) {
-        (Ready, Event::SendToAgent) | (Stale, Event::Regenerate) => Some(AgentWorking),
+        (Ready, Event::SendToAgent) | (Ready | Snoozed | Stale, Event::Regenerate) => {
+            Some(AgentWorking)
+        }
         (AgentWorking, Event::AgentDone) => Some(Ready),
         (AgentWorking, Event::AgentFailed { back_to }) => {
             matches!(back_to, Ready | Stale).then_some(*back_to)
@@ -732,5 +734,24 @@ mod tests {
             .unwrap(),
             r#"{"kind":"draft","version":1,"quote":"q"}"#
         );
+    }
+
+    #[test]
+    fn open_cards_can_be_reprocessed() {
+        for s in [Status::Ready, Status::Snoozed, Status::Stale] {
+            assert_eq!(
+                transition(s, &Event::Regenerate).unwrap(),
+                Status::AgentWorking,
+                "{s:?}"
+            );
+        }
+        for s in [
+            Status::Applying,
+            Status::Accepted,
+            Status::Closed,
+            Status::AgentWorking,
+        ] {
+            assert!(transition(s, &Event::Regenerate).is_err(), "{s:?}");
+        }
     }
 }
