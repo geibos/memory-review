@@ -106,11 +106,48 @@ pub fn locate(md: &str, quote: &str) -> Option<Vec<Span>> {
     let mut spans = Vec::new();
     let mut from = 0;
     for line in quote.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let at = from + md[from..].find(line)?;
-        spans.push((at, at + line.len()));
-        from = at + line.len();
+        let (at, end) = match md[from..].find(line) {
+            Some(i) => (from + i, from + i + line.len()),
+            None => find_without_markup(md, from, line)?,
+        };
+        spans.push((at, end));
+        from = end;
     }
     (!spans.is_empty()).then_some(spans)
+}
+
+/// Inline markup that disappears when markdown is rendered.
+fn is_markup(c: char) -> bool {
+    matches!(c, '`' | '*' | '_')
+}
+
+/// Finds `needle` in `md[from..]` ignoring inline markup on both sides, and
+/// returns the byte range in `md`. Lets a quote copied from the rendered page
+/// match its markdown source.
+fn find_without_markup(md: &str, from: usize, needle: &str) -> Option<Span> {
+    let mut plain = String::new();
+    // For every byte of `plain`, the byte index in `md` it came from.
+    let mut origin: Vec<usize> = Vec::new();
+    for (i, c) in md[from..].char_indices() {
+        if is_markup(c) {
+            continue;
+        }
+        plain.push(c);
+        origin.extend((0..c.len_utf8()).map(|k| from + i + k));
+    }
+    let needle: String = needle.chars().filter(|c| !is_markup(*c)).collect();
+    if needle.is_empty() {
+        return None;
+    }
+    let at = plain.find(&needle)?;
+    let start = origin[at];
+    let last = origin[at + needle.len() - 1];
+    // Include a closing marker that directly follows the match (`x` → `x`).
+    let mut end = last + 1;
+    while md[end..].starts_with(is_markup) {
+        end += 1;
+    }
+    Some((start, end))
 }
 
 /// Moves a span start past block syntax (`- `, `1. `, `# `, `> `) when the span
@@ -372,5 +409,23 @@ mod tests {
             assert!(h.contains(inner), "{md}: {h}");
             assert!(h.contains("<mark"), "{md}: {h}");
         }
+    }
+
+    #[test]
+    fn locate_matches_rendered_text_without_markup() {
+        // A selection in the rendered draft has no backticks or emphasis markers.
+        let md = "- [practice] Add `x=1` to the **[Timer]** section\n- next";
+        let spans = locate(md, "[practice] Add x=1 to the [Timer] section").unwrap();
+        assert_eq!(
+            &md[spans[0].0..spans[0].1],
+            "[practice] Add `x=1` to the **[Timer]** section"
+        );
+    }
+
+    #[test]
+    fn locate_prefers_exact_match() {
+        let md = "a `b` c and a b c";
+        let spans = locate(md, "a b c").unwrap();
+        assert_eq!(&md[spans[0].0..spans[0].1], "a b c");
     }
 }
