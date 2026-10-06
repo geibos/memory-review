@@ -250,3 +250,11 @@ kbd { font-size: 10px; border: 1px solid currentColor; border-bottom-width: 2px;
 .chip-x { border: 0; background: none; cursor: pointer; color: var(--subtext0); }
 .margin .compose, .line-comments .compose { margin-top: 4px; }
 .float-c { position: fixed; z-index: 20; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 8px; border: 0; background: var(--mauve); color: var(--on-accent); cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.25); }
+
+/* v2 layout fixes */
+.card { max-width: 1200px; }
+.margin { grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.margin > * { min-width: 0; }
+.note details summary.quote { display: block; overflow: hidden; text-overflow: ellipsis; }
+.card-head .path { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card-head .sp { flex: 0; }
