@@ -151,10 +151,24 @@ fn find_without_markup(md: &str, from: usize, needle: &str) -> Option<Span> {
         if is_markup(c) {
             continue;
         }
+        if c.is_whitespace() {
+            // Runs of whitespace (including line breaks) compare as one space.
+            if !plain.ends_with(' ') {
+                plain.push(' ');
+                origin.push(from + i);
+            }
+            continue;
+        }
         plain.push(c);
         origin.extend((0..c.len_utf8()).map(|k| from + i + k));
     }
-    let needle: String = needle.chars().filter(|c| !is_markup(*c)).collect();
+    let needle = needle
+        .chars()
+        .filter(|c| !is_markup(*c))
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     if needle.is_empty() {
         return None;
     }
@@ -522,5 +536,21 @@ mod tests {
         let finals = h.matches(r#"<mark class="add" data-n="1">"#).count();
         let more = h.matches(r#"<mark class="add more" data-n="1">"#).count();
         assert_eq!((finals, more), (1, 1), "{h}");
+    }
+
+    #[test]
+    fn locate_normalizes_whitespace() {
+        let md = "a   b   c d";
+        assert_eq!(locate(md, "a b c d"), Some(vec![(0, md.len())]));
+    }
+
+    #[test]
+    fn locate_across_soft_line_break() {
+        // The browser renders a soft break as a space.
+        let md = "first line\nsecond line\n\nother";
+        let spans = locate(md, "first line second line").unwrap();
+        assert_eq!(&md[spans[0].0..spans[0].1], "first line\nsecond line");
+        let h = markdown_highlighted(md, &[hl(spans, 1)]);
+        assert_eq!(h.matches("<mark").count(), 2, "{h}");
     }
 }
