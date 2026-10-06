@@ -253,11 +253,15 @@ pub fn insert_proposal(c: &mut Connection, np: &NewProposal) -> anyhow::Result<i
     Ok(id)
 }
 
+/// Replaces the proposal and its sources. `bump` raises the draft version;
+/// pass it only when the draft text changed, so comments on the current
+/// version and open tabs stay valid otherwise.
 pub fn update_draft(
     c: &mut Connection,
     id: i64,
     v: &ValidatedProposal,
     sources: &[SourceRow],
+    bump: bool,
 ) -> anyhow::Result<()> {
     let tx = c.transaction()?;
     tx.execute(
@@ -267,7 +271,7 @@ pub fn update_draft(
     insert_sources(&tx, id, sources)?;
     let n = tx.execute(
         "UPDATE proposals SET action = ?2, target_dir = ?3, target_title = ?4, draft = ?5,
-                tags = ?6, rationale = ?7, version = version + 1, applied_permalink = NULL,
+                tags = ?6, rationale = ?7, version = version + ?10, applied_permalink = NULL,
                 error = NULL, changes = ?9,
                 updated_at = ?8
          WHERE id = ?1",
@@ -280,7 +284,8 @@ pub fn update_draft(
             tags_json(&v.tags),
             v.rationale,
             fmt_time(now()),
-            changes_json(&v.changes)
+            changes_json(&v.changes),
+            i64::from(bump)
         ],
     )?;
     if n != 1 {
@@ -708,7 +713,7 @@ mod tests {
         let mut n = np(&["p/inbox/a"]);
         n.v.draft = Some("new".into());
         n.sources[0].content_hash = "hash-new".into();
-        db.call(move |c| update_draft(c, id, &n.v, &n.sources))
+        db.call(move |c| update_draft(c, id, &n.v, &n.sources, true))
             .await
             .unwrap();
 
@@ -740,7 +745,7 @@ mod tests {
             .await
             .unwrap();
         let n = np(&["p/inbox/a"]);
-        db.call(move |c| update_draft(c, id, &n.v, &n.sources))
+        db.call(move |c| update_draft(c, id, &n.v, &n.sources, true))
             .await
             .unwrap();
         assert!(
@@ -760,7 +765,7 @@ mod tests {
         insert(&db, &["p/inbox/b"]).await;
         let n = np(&["p/inbox/a", "p/inbox/b"]);
         let e = db
-            .call(move |c| update_draft(c, id, &n.v, &n.sources))
+            .call(move |c| update_draft(c, id, &n.v, &n.sources, true))
             .await
             .unwrap_err();
         assert!(e.downcast_ref::<ClaimConflict>().is_some());
@@ -1049,7 +1054,7 @@ mod tests {
             source: Some("p/inbox/a".into()),
             why: "w".into(),
         }];
-        db.call(move |c| update_draft(c, id, &n.v, &n.sources))
+        db.call(move |c| update_draft(c, id, &n.v, &n.sources, true))
             .await
             .unwrap();
         let p = db

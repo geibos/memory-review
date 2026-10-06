@@ -712,7 +712,7 @@ impl Agent {
                     changes: if r.draft.is_some() {
                         r.changes.clone()
                     } else {
-                        Some(card.changes.clone())
+                        r.changes.clone().or_else(|| Some(card.changes.clone()))
                     },
                 };
                 let v = p.validate(&ClaimContext {
@@ -724,6 +724,7 @@ impl Agent {
             .await?;
 
         if let Some(v) = revised {
+            let bump = v.draft != card.draft;
             let mut new_rows = Vec::new();
             for p in &v.sources {
                 let note = match live.iter().find(|n| &n.permalink == p) {
@@ -737,7 +738,7 @@ impl Agent {
                 new_rows.push(source_row(&note));
             }
             self.db
-                .call(move |c| db::update_draft(c, id, &v, &new_rows))
+                .call(move |c| db::update_draft(c, id, &v, &new_rows, bump))
                 .await?;
         }
         let model = self.llm.model();
@@ -783,7 +784,7 @@ impl Agent {
             let ctx = self.gather(origin, live).await?;
             let (v, sources) = self.propose(&ctx).await?;
             self.db
-                .call(move |c| db::update_draft(c, id, &v, &sources))
+                .call(move |c| db::update_draft(c, id, &v, &sources, true))
                 .await
         }
         .await;
@@ -1459,5 +1460,44 @@ mod tests {
     #[test]
     fn reply_prompt_has_changes_slot() {
         assert!(Prompts::load(None).unwrap().reply.contains("{{changes}}"));
+    }
+
+    #[tokio::test]
+    async fn reply_with_only_changes_updates_notes_keeps_version() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        let mut p = promote(&a);
+        p["changes"] = json!([ch("added", "- [fact] clean")]);
+        w.llm.push_tool(p);
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "Note 1 is wrong, it was rewritten").await;
+        w.set_working(id, Status::Ready).await;
+        w.llm.push_tool(
+            json!({"reply": "Corrected.", "changes": [ch("rewritten", "- [fact] clean")]}),
+        );
+        w.agent().reply(id).await.unwrap();
+        let card = w.card(id).await;
+        assert_eq!(card.version, 1, "the draft text did not change");
+        assert_eq!(card.changes[0].kind, crate::domain::ChangeKind::Rewritten);
+    }
+
+    #[tokio::test]
+    async fn reply_moving_folder_keeps_version() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "Other folder").await;
+        w.set_working(id, Status::Ready).await;
+        w.llm
+            .push_tool(json!({"reply": "Moved.", "target_dir": "ops"}));
+        w.agent().reply(id).await.unwrap();
+        let card = w.card(id).await;
+        assert_eq!(card.target_dir.as_deref(), Some("ops"));
+        assert_eq!(card.version, 1);
     }
 }
