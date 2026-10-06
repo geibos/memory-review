@@ -33,9 +33,14 @@ impl DiffLine {
     }
 }
 
-/// Markdown to HTML. Raw HTML in the input is shown as text, never rendered.
-pub fn markdown(md: &str) -> String {
-    use pulldown_cmark::{CowStr, Event, Options, Parser, Tag, html};
+fn options() -> pulldown_cmark::Options {
+    use pulldown_cmark::Options;
+    Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS
+}
+
+/// Raw HTML becomes text; link and image URLs with a non-web scheme become `#`.
+fn sanitize(ev: pulldown_cmark::Event<'_>) -> pulldown_cmark::Event<'_> {
+    use pulldown_cmark::{CowStr, Event, Tag};
 
     fn safe_url(url: CowStr<'_>) -> CowStr<'_> {
         let lower = url.trim().to_ascii_lowercase();
@@ -49,8 +54,7 @@ pub fn markdown(md: &str) -> String {
         }
     }
 
-    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events = Parser::new_ext(md, opts).map(|ev| match ev {
+    match ev {
         Event::Html(t) | Event::InlineHtml(t) => Event::Text(t),
         Event::Start(Tag::Link {
             link_type,
@@ -75,19 +79,34 @@ pub fn markdown(md: &str) -> String {
             id,
         }),
         other => other,
-    });
+    }
+}
+
+/// Markdown to HTML. Raw HTML in the input is shown as text, never rendered.
+pub fn markdown(md: &str) -> String {
     let mut out = String::new();
-    html::push_html(&mut out, events);
+    pulldown_cmark::html::push_html(
+        &mut out,
+        pulldown_cmark::Parser::new_ext(md, options()).map(sanitize),
+    );
     out
 }
 
 /// Byte range in the markdown source.
 pub type Span = (usize, usize);
 
-/// One highlight: where it is and the opening tag that wraps it.
+/// One highlight: where it is, its CSS class and its number.
 pub struct Highlight {
     pub spans: Vec<Span>,
-    pub open: String,
+    pub class: &'static str,
+    pub n: usize,
+}
+
+impl Highlight {
+    fn open(&self, last: bool) -> String {
+        let more = if last { "" } else { " more" };
+        format!(r#"<mark class="{}{more}" data-n="{}">"#, self.class, self.n)
+    }
 }
 
 /// Removes Private Use Area characters, which the highlighter uses as markers.
@@ -150,90 +169,104 @@ fn find_without_markup(md: &str, from: usize, needle: &str) -> Option<Span> {
     Some((start, end))
 }
 
-/// Moves a span start past block syntax (`- `, `1. `, `# `, `> `) when the span
-/// begins its line: a marker in front of that syntax would break the block.
-fn skip_block_prefix(md: &str, start: usize, end: usize) -> usize {
-    let line_start = md[..start].rfind('\n').map_or(0, |i| i + 1);
-    if !md[line_start..start].trim().is_empty() {
-        return start;
-    }
-    let mut pos = start;
-    loop {
-        let rest = &md[pos..end];
-        let trimmed = rest.trim_start_matches([' ', '\t']);
-        let ws = rest.len() - trimmed.len();
-        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
-        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
-        let prefix = if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
-            hashes + 1
-        } else if trimmed.starts_with("> ") {
-            2
-        } else if trimmed.starts_with('>') {
-            1
-        } else if trimmed.starts_with("- ")
-            || trimmed.starts_with("* ")
-            || trimmed.starts_with("+ ")
-        {
-            2
-        } else if (1..=9).contains(&digits)
-            && (trimmed[digits..].starts_with(". ") || trimmed[digits..].starts_with(") "))
-        {
-            digits + 2
-        } else {
-            return pos;
-        };
-        if pos + ws + prefix >= end {
-            return pos;
-        }
-        pos += ws + prefix;
-    }
-}
-
 /// Markdown to HTML with the given spans wrapped in `<mark>` tags.
+///
+/// The source is never modified: tags are placed around the parser's text
+/// events by their source offsets, so block syntax (lists, tables, fences,
+/// headings) renders exactly as without highlights. Text inside images (the
+/// alt attribute) is never wrapped. A highlight spread over several pieces of
+/// text shows its number badge only on the last piece (`more` on the others).
 pub fn markdown_highlighted(md: &str, highlights: &[Highlight]) -> String {
-    use std::collections::BTreeMap;
+    use pulldown_cmark::{CowStr, Event, Parser, Tag, TagEnd};
 
-    // Marker characters: U+E100+i opens highlight i, U+E200+i closes it.
-    let highlights = &highlights[..highlights.len().min(255)];
-    let marker = |base: u32, i: usize| char::from_u32(base + i as u32).unwrap_or('\u{E0FF}');
-    // At one position, closing markers go before opening ones.
-    let mut at: BTreeMap<usize, (String, String)> = BTreeMap::new();
-    for (i, h) in highlights.iter().enumerate() {
-        for &(start, end) in &h.spans {
-            if start >= end
-                || end > md.len()
-                || !md.is_char_boundary(start)
-                || !md.is_char_boundary(end)
-            {
-                continue;
-            }
-            let start = skip_block_prefix(md, start, end);
-            at.entry(start).or_default().1.push(marker(0xE100, i));
-            at.entry(end).or_default().0.push(marker(0xE200, i));
+    let last_end: Vec<usize> = highlights
+        .iter()
+        .map(|h| h.spans.iter().map(|s| s.1).max().unwrap_or(0))
+        .collect();
+    // Highlights with a span that fully covers [a, b).
+    let covering = |a: usize, b: usize| -> Vec<usize> {
+        (0..highlights.len())
+            .filter(|&i| highlights[i].spans.iter().any(|&(s, e)| s <= a && b <= e))
+            .collect()
+    };
+    // Highlights with a span overlapping [a, b) at all.
+    let touching = |a: usize, b: usize| -> Vec<usize> {
+        (0..highlights.len())
+            .filter(|&i| highlights[i].spans.iter().any(|&(s, e)| s < b && a < e))
+            .collect()
+    };
+    fn wrap<'a>(
+        out: &mut Vec<Event<'a>>,
+        highlights: &[Highlight],
+        last_end: &[usize],
+        cover: &[usize],
+        end: usize,
+        inner: Event<'a>,
+    ) {
+        for &i in cover {
+            out.push(Event::InlineHtml(CowStr::from(
+                highlights[i].open(end >= last_end[i]),
+            )));
+        }
+        out.push(inner);
+        for _ in cover {
+            out.push(Event::InlineHtml(CowStr::Borrowed("</mark>")));
         }
     }
-    let mut marked = String::with_capacity(md.len() + at.len() * 6);
-    let mut last = 0;
-    for (pos, (closes, opens)) in &at {
-        marked.push_str(&md[last..*pos]);
-        marked.push_str(closes);
-        marked.push_str(opens);
-        last = *pos;
-    }
-    marked.push_str(&md[last..]);
 
-    let html = markdown(&marked);
-    let mut out = String::with_capacity(html.len() + highlights.len() * 40);
-    for c in html.chars() {
-        let code = c as u32;
-        match code {
-            0xE100..=0xE1FE if (code - 0xE100) < highlights.len() as u32 => {
-                out.push_str(&highlights[(code - 0xE100) as usize].open);
+    let mut events: Vec<Event<'_>> = Vec::new();
+    let mut in_image = 0usize;
+    for (ev, range) in Parser::new_ext(md, options()).into_offset_iter() {
+        let ev = sanitize(ev);
+        match &ev {
+            Event::Start(Tag::Image { .. }) => in_image += 1,
+            Event::End(TagEnd::Image) => in_image = in_image.saturating_sub(1),
+            _ => {}
+        }
+        if in_image > 0 || highlights.is_empty() {
+            events.push(ev);
+            continue;
+        }
+        match ev {
+            // Text that is a verbatim slice of the source: split it exactly.
+            Event::Text(t) if md.get(range.clone()) == Some(t.as_ref()) => {
+                let mut cuts = vec![range.start, range.end];
+                for h in highlights {
+                    for &(s, e) in &h.spans {
+                        for p in [s, e] {
+                            if p > range.start && p < range.end && md.is_char_boundary(p) {
+                                cuts.push(p);
+                            }
+                        }
+                    }
+                }
+                cuts.sort_unstable();
+                cuts.dedup();
+                for w in cuts.windows(2) {
+                    let (a, b) = (w[0], w[1]);
+                    let piece = Event::Text(CowStr::Borrowed(&md[a..b]));
+                    let cover = covering(a, b);
+                    if cover.is_empty() {
+                        events.push(piece);
+                    } else {
+                        wrap(&mut events, highlights, &last_end, &cover, b, piece);
+                    }
+                }
             }
-            0xE200..=0xE2FE if (code - 0xE200) < highlights.len() as u32 => out.push_str("</mark>"),
-            _ => out.push(c),
+            // Escaped text or inline code: wrap the whole piece if touched.
+            ev @ (Event::Text(_) | Event::Code(_)) => {
+                let cover = touching(range.start, range.end);
+                if cover.is_empty() {
+                    events.push(ev);
+                } else {
+                    wrap(&mut events, highlights, &last_end, &cover, range.end, ev);
+                }
+            }
+            other => events.push(other),
         }
     }
+    let mut out = String::new();
+    pulldown_cmark::html::push_html(&mut out, events.into_iter());
     out
 }
 
@@ -306,7 +339,8 @@ mod tests {
     fn hl(spans: Vec<Span>, n: usize) -> Highlight {
         Highlight {
             spans,
-            open: format!(r#"<mark class="add" data-n="{n}">"#),
+            class: "add",
+            n,
         }
     }
 
@@ -354,7 +388,7 @@ mod tests {
     fn highlight_inside_code_span() {
         let h = markdown_highlighted("say `a b` now", &[hl(vec![(5, 8)], 2)]);
         assert!(
-            h.contains(r#"<code><mark class="add" data-n="2">a b</mark></code>"#),
+            h.contains(r#"<mark class="add" data-n="2"><code>a b</code></mark>"#),
             "{h}"
         );
     }
@@ -363,8 +397,9 @@ mod tests {
     fn highlights_on_two_lines_and_nested() {
         let md = "- first line\n- second line";
         let h = markdown_highlighted(md, &[hl(vec![(2, 12), (15, 21)], 1), hl(vec![(2, 7)], 2)]);
-        assert_eq!(h.matches("<mark").count(), 3, "{h}");
-        assert_eq!(h.matches("</mark>").count(), 3, "{h}");
+        // Segments: "first" (both), " line" (1), "second" (1).
+        assert_eq!(h.matches("<mark").count(), 4, "{h}");
+        assert_eq!(h.matches("</mark>").count(), 4, "{h}");
     }
 
     #[test]
@@ -427,5 +462,65 @@ mod tests {
         let md = "a `b` c and a b c";
         let spans = locate(md, "a b c").unwrap();
         assert_eq!(&md[spans[0].0..spans[0].1], "a b c");
+    }
+
+    fn whole(md: &str, from: &str, to_end: &str) -> Vec<Span> {
+        let a = md.find(from).unwrap();
+        let b = md.find(to_end).unwrap() + to_end.len();
+        vec![(a, b)]
+    }
+
+    #[test]
+    fn table_row_highlight_keeps_table() {
+        let md = "| a | b |\n|---|---|\n| ячейка | два |";
+        let h = markdown_highlighted(md, &[hl(whole(md, "| ячейка", "два |"), 1)]);
+        assert_eq!(h.matches("<td>").count(), 2, "{h}");
+        assert!(h.contains("два"), "{h}");
+        assert!(h.contains("<mark"), "{h}");
+    }
+
+    #[test]
+    fn fenced_code_highlight_keeps_fence() {
+        let md = "intro\n```\nкод\n```\nafter *x*";
+        let h = markdown_highlighted(md, &[hl(whole(md, "```\nкод", "код"), 1)]);
+        assert_eq!(h.matches("<pre>").count(), 1, "{h}");
+        assert!(h.contains("<em>x</em>"), "{h}");
+    }
+
+    #[test]
+    fn setext_heading_and_rule_kept() {
+        let md = "Title\n---\n\n* * *\nnext";
+        let h = markdown_highlighted(
+            md,
+            &[hl(vec![(0, 9)], 1), hl(whole(md, "* * *", "* * *"), 2)],
+        );
+        assert!(h.contains("<h2>"), "{h}");
+        assert!(h.contains("<hr />"), "{h}");
+    }
+
+    #[test]
+    fn task_checkbox_kept() {
+        let md = "- [ ] задача";
+        let h = markdown_highlighted(md, &[hl(vec![(0, md.len())], 1)]);
+        assert!(h.contains(r#"type="checkbox""#), "{h}");
+        assert!(h.contains("задача</mark>"), "{h}");
+    }
+
+    #[test]
+    fn image_alt_and_link_url_untouched() {
+        let md = "![картинка](https://example.com/a.png) and [link](https://example.com)";
+        let spans = vec![(0, md.len())];
+        let h = markdown_highlighted(md, &[hl(spans, 1)]);
+        assert!(h.contains(r#"alt="картинка""#), "{h}");
+        assert!(h.contains(r#"href="https://example.com""#), "{h}");
+    }
+
+    #[test]
+    fn number_badge_once_per_highlight() {
+        let md = "- one two\n- three four";
+        let h = markdown_highlighted(md, &[hl(vec![(2, 9), (12, 22)], 1)]);
+        let finals = h.matches(r#"<mark class="add" data-n="1">"#).count();
+        let more = h.matches(r#"<mark class="add more" data-n="1">"#).count();
+        assert_eq!((finals, more), (1, 1), "{h}");
     }
 }

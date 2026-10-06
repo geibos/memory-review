@@ -352,10 +352,8 @@ fn annotate(
         if !item.spans.is_empty() {
             highlights.push(Highlight {
                 spans: item.spans.clone(),
-                open: format!(
-                    r#"<mark class="{}" data-n="{}">"#,
-                    item.note.class, item.note.n
-                ),
+                class: item.note.class,
+                n: item.note.n,
             });
         }
     }
