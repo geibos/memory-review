@@ -188,7 +188,7 @@ async fn accept_via_http_moves_note() {
     let t = setup();
     let a = t.mem.add("inbox", "A", "a");
     let id = t.card(Action::Promote, &[&a]).await;
-    let (s, body, headers) = t.post(&format!("/p/{id}/accept"), "").await;
+    let (s, body, headers) = t.post(&format!("/p/{id}/accept"), "version=1").await;
     assert_eq!(s, StatusCode::OK, "{body}");
     assert_eq!(headers["hx-trigger"], "mr:queue");
     assert!(t.mem.raw("p/verified/ops/final-title").is_some());
@@ -569,4 +569,15 @@ async fn static_assets_are_versioned() {
     assert!(page.contains("/static/app.js?v="), "{page}");
     let (_, settings) = t.get("/settings").await;
     assert!(settings.contains("/static/app.css?v="));
+}
+
+#[tokio::test]
+async fn accept_without_version_is_refused() {
+    // A tab opened before versions existed must reload before accepting.
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let (_, frag, _) = t.post(&format!("/p/{id}/accept"), "").await;
+    assert!(frag.contains(t.state.t.draft_changed), "{frag}");
+    assert_eq!(t.status(id).await, Status::Ready);
 }

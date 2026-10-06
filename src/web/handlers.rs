@@ -292,7 +292,7 @@ pub async fn accept(
     };
     // The draft can only change outside `ready`, and accept itself requires
     // `ready`, so checking the version here is enough.
-    if f.version.is_some_and(|v| v != card.version) {
+    if f.version != Some(card.version) {
         let notice = Some(s.t.draft_changed.to_string());
         return card_response(&s, load_card(&s, id, notice).await?);
     }
