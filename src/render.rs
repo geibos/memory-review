@@ -81,6 +81,85 @@ pub fn markdown(md: &str) -> String {
     out
 }
 
+/// Byte range in the markdown source.
+pub type Span = (usize, usize);
+
+/// One highlight: where it is and the opening tag that wraps it.
+pub struct Highlight {
+    pub spans: Vec<Span>,
+    pub open: String,
+}
+
+/// Removes Private Use Area characters, which the highlighter uses as markers.
+pub fn strip_private_use(s: &str) -> String {
+    s.chars()
+        .filter(|c| !('\u{E000}'..='\u{F8FF}').contains(c))
+        .collect()
+}
+
+/// Finds a quote in the markdown, line by line, first occurrence only.
+/// Quotes shorter than 3 characters are not located.
+pub fn locate(md: &str, quote: &str) -> Option<Vec<Span>> {
+    if quote.trim().chars().count() < 3 {
+        return None;
+    }
+    let mut spans = Vec::new();
+    let mut from = 0;
+    for line in quote.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        let at = from + md[from..].find(line)?;
+        spans.push((at, at + line.len()));
+        from = at + line.len();
+    }
+    (!spans.is_empty()).then_some(spans)
+}
+
+/// Markdown to HTML with the given spans wrapped in `<mark>` tags.
+pub fn markdown_highlighted(md: &str, highlights: &[Highlight]) -> String {
+    use std::collections::BTreeMap;
+
+    // Marker characters: U+E100+i opens highlight i, U+E200+i closes it.
+    let highlights = &highlights[..highlights.len().min(255)];
+    let marker = |base: u32, i: usize| char::from_u32(base + i as u32).unwrap_or('\u{E0FF}');
+    // At one position, closing markers go before opening ones.
+    let mut at: BTreeMap<usize, (String, String)> = BTreeMap::new();
+    for (i, h) in highlights.iter().enumerate() {
+        for &(start, end) in &h.spans {
+            if start >= end
+                || end > md.len()
+                || !md.is_char_boundary(start)
+                || !md.is_char_boundary(end)
+            {
+                continue;
+            }
+            at.entry(start).or_default().1.push(marker(0xE100, i));
+            at.entry(end).or_default().0.push(marker(0xE200, i));
+        }
+    }
+    let mut marked = String::with_capacity(md.len() + at.len() * 6);
+    let mut last = 0;
+    for (pos, (closes, opens)) in &at {
+        marked.push_str(&md[last..*pos]);
+        marked.push_str(closes);
+        marked.push_str(opens);
+        last = *pos;
+    }
+    marked.push_str(&md[last..]);
+
+    let html = markdown(&marked);
+    let mut out = String::with_capacity(html.len() + highlights.len() * 40);
+    for c in html.chars() {
+        let code = c as u32;
+        match code {
+            0xE100..=0xE1FE if (code - 0xE100) < highlights.len() as u32 => {
+                out.push_str(&highlights[(code - 0xE100) as usize].open);
+            }
+            0xE200..=0xE2FE if (code - 0xE200) < highlights.len() as u32 => out.push_str("</mark>"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Line diff between the body of a raw note (frontmatter dropped) and a draft.
 pub fn diff(old_raw: &str, new: &str) -> Vec<DiffLine> {
     use similar::{ChangeTag, TextDiff};
@@ -145,5 +224,85 @@ mod tests {
     fn diff_ignores_frontmatter() {
         let d = diff("---\ntitle: T\n---\nsame", "same");
         assert!(d.iter().all(|l| l.kind == DiffKind::Same));
+    }
+
+    fn hl(spans: Vec<Span>, n: usize) -> Highlight {
+        Highlight {
+            spans,
+            open: format!(r#"<mark class="add" data-n="{n}">"#),
+        }
+    }
+
+    #[test]
+    fn locate_single_line() {
+        assert_eq!(locate("- a b c\n- d", "a b c"), Some(vec![(2, 7)]));
+    }
+
+    #[test]
+    fn locate_trims_quote() {
+        assert_eq!(locate("- a b c", "  a b c \n"), Some(vec![(2, 7)]));
+    }
+
+    #[test]
+    fn locate_multi_line() {
+        assert_eq!(
+            locate("xxx\nyyy\nzzz", "xxx\nzzz"),
+            Some(vec![(0, 3), (8, 11)])
+        );
+        assert_eq!(locate("zzz\nxxx", "xxx\nzzz"), None, "order matters");
+    }
+
+    #[test]
+    fn locate_missing_or_tiny() {
+        assert!(locate("abc", "zzz").is_none());
+        assert!(locate("abc", "ab").is_none());
+        assert!(locate("abc", "   ").is_none());
+    }
+
+    #[test]
+    fn locate_first_occurrence_only() {
+        assert_eq!(locate("dup and dup", "dup"), Some(vec![(0, 3)]));
+    }
+
+    #[test]
+    fn highlighted_wraps_text_in_mark() {
+        let h = markdown_highlighted("- hello world", &[hl(vec![(2, 7)], 1)]);
+        assert!(
+            h.contains(r#"<li><mark class="add" data-n="1">hello</mark> world</li>"#),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn highlight_inside_code_span() {
+        let h = markdown_highlighted("say `a b` now", &[hl(vec![(5, 8)], 2)]);
+        assert!(
+            h.contains(r#"<code><mark class="add" data-n="2">a b</mark></code>"#),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn highlights_on_two_lines_and_nested() {
+        let md = "- first line\n- second line";
+        let h = markdown_highlighted(md, &[hl(vec![(2, 12), (15, 21)], 1), hl(vec![(2, 7)], 2)]);
+        assert_eq!(h.matches("<mark").count(), 3, "{h}");
+        assert_eq!(h.matches("</mark>").count(), 3, "{h}");
+    }
+
+    #[test]
+    fn pua_in_input_cannot_forge_marks() {
+        let md = format!("x{}y{}z", '\u{E100}', '\u{E200}');
+        let clean = strip_private_use(&md);
+        assert_eq!(clean, "xyz");
+        assert!(!markdown_highlighted(&clean, &[]).contains("<mark"));
+    }
+
+    #[test]
+    fn raw_html_still_escaped_with_marks() {
+        let md = "<b>x</b> text";
+        let h = markdown_highlighted(md, &[hl(vec![(9, 13)], 1)]);
+        assert!(!h.contains("<b>"), "{h}");
+        assert!(h.contains("text</mark>"), "{h}");
     }
 }
