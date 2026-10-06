@@ -96,6 +96,7 @@ impl T {
             draft: writes.then(|| "- [fact] final <script>x</script>".into()),
             tags: vec![],
             rationale: "Because.".into(),
+            changes: vec![],
         };
         self.state
             .db

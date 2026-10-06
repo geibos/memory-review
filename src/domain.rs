@@ -128,6 +128,75 @@ pub fn can_comment(s: Status) -> bool {
     !matches!(s, Status::Accepted | Status::Closed)
 }
 
+/// What the agent did to a piece of text, and why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeKind {
+    Added,
+    Rewritten,
+    Removed,
+}
+
+/// One change note: `text` quotes the draft (added, rewritten) or a source (removed).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Change {
+    pub kind: ChangeKind,
+    pub text: String,
+    #[serde(default)]
+    pub source: Option<String>,
+    pub why: String,
+}
+
+/// What a comment points at.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase")]
+pub enum Anchor {
+    Draft { version: i64, quote: String },
+    Diff { permalink: String, line: String },
+}
+
+pub const MAX_CHANGES: usize = 30;
+
+/// Checks change notes; `required` makes a missing list an error.
+pub fn validate_changes(raw: Option<Vec<Change>>, required: bool) -> Result<Vec<Change>, String> {
+    let Some(list) = raw else {
+        return if required {
+            Err("`changes` is required with a draft: list every added, rewritten and removed piece (it may be an empty list)".into())
+        } else {
+            Ok(Vec::new())
+        };
+    };
+    if list.len() > MAX_CHANGES {
+        return Err(format!(
+            "`changes` has {} items; at most {MAX_CHANGES}",
+            list.len()
+        ));
+    }
+    list.into_iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let text = c.text.trim().to_string();
+            let why = c.why.trim().to_string();
+            let source = c
+                .source
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+            if text.is_empty() || why.is_empty() {
+                return Err(format!("`changes[{i}]` needs non-empty `text` and `why`"));
+            }
+            if c.kind == ChangeKind::Removed && source.is_none() {
+                return Err(format!("`changes[{i}]` is `removed` and needs `source`"));
+            }
+            Ok(Change {
+                kind: c.kind,
+                text,
+                source,
+                why,
+            })
+        })
+        .collect()
+}
+
 /// The agent's answer, as received from the model.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct AgentProposal {
@@ -142,6 +211,8 @@ pub struct AgentProposal {
     #[serde(default)]
     pub tags: Option<Vec<String>>,
     pub rationale: String,
+    #[serde(default)]
+    pub changes: Option<Vec<Change>>,
 }
 
 /// A proposal that passed [`AgentProposal::validate`].
@@ -154,6 +225,7 @@ pub struct ValidatedProposal {
     pub draft: Option<String>,
     pub tags: Vec<String>,
     pub rationale: String,
+    pub changes: Vec<Change>,
 }
 
 /// What the agent is allowed to claim.
@@ -221,6 +293,7 @@ impl AgentProposal {
                 draft: None,
                 tags: Vec::new(),
                 rationale,
+                changes: Vec::new(),
             });
         }
 
@@ -255,6 +328,7 @@ impl AgentProposal {
             .filter(|d| !d.is_empty())
             .ok_or("`draft` is required for promote and merge")?;
 
+        let changes = validate_changes(self.changes, true)?;
         Ok(ValidatedProposal {
             action,
             sources,
@@ -269,6 +343,7 @@ impl AgentProposal {
                 .filter(|t| !t.is_empty())
                 .collect(),
             rationale,
+            changes,
         })
     }
 }
@@ -439,6 +514,7 @@ mod tests {
             draft: Some("- [fact] x".into()),
             tags: None,
             rationale: "r".into(),
+            changes: Some(vec![]),
         }
     }
 
@@ -570,5 +646,91 @@ mod tests {
         let mut x = p("promote", &["p/inbox/a"]);
         x.rationale = " ".into();
         assert!(check(x, "p/inbox/a", &f).is_err());
+    }
+
+    fn ch(kind: ChangeKind, text: &str) -> Change {
+        Change {
+            kind,
+            text: text.into(),
+            source: Some("p/inbox/a".into()),
+            why: "w".into(),
+        }
+    }
+
+    #[test]
+    fn changes_required_for_promote() {
+        let f = free(&["p/inbox/a"]);
+        let mut x = p("promote", &["p/inbox/a"]);
+        x.changes = None;
+        let e = check(x, "p/inbox/a", &f).unwrap_err();
+        assert!(e.contains("changes"), "{e}");
+    }
+
+    #[test]
+    fn promote_keeps_validated_changes() {
+        let f = free(&["p/inbox/a"]);
+        let mut x = p("promote", &["p/inbox/a"]);
+        x.changes = Some(vec![ch(ChangeKind::Added, " new line ")]);
+        let v = check(x, "p/inbox/a", &f).unwrap();
+        assert_eq!(v.changes[0].text, "new line");
+    }
+
+    #[test]
+    fn delete_ignores_changes() {
+        let f = free(&["p/inbox/a"]);
+        let mut x = p("delete", &["p/inbox/a"]);
+        x.changes = Some(vec![ch(ChangeKind::Added, "x")]);
+        assert!(check(x, "p/inbox/a", &f).unwrap().changes.is_empty());
+    }
+
+    #[test]
+    fn changes_validated() {
+        assert!(validate_changes(Some(vec![ch(ChangeKind::Added, "x")]), true).is_ok());
+        assert!(validate_changes(Some(vec![ch(ChangeKind::Added, " ")]), true).is_err());
+        let mut no_why = ch(ChangeKind::Rewritten, "x");
+        no_why.why = "  ".into();
+        assert!(validate_changes(Some(vec![no_why]), true).is_err());
+        let mut r = ch(ChangeKind::Removed, "x");
+        r.source = None;
+        assert!(validate_changes(Some(vec![r]), true).is_err());
+        assert!(validate_changes(Some(vec![ch(ChangeKind::Added, "x"); 31]), true).is_err());
+        assert!(validate_changes(None, true).is_err());
+        assert_eq!(validate_changes(None, false).unwrap(), vec![]);
+        assert!(validate_changes(Some(vec![]), true).is_ok());
+    }
+
+    #[test]
+    fn change_kind_parses_lowercase() {
+        let c: Change =
+            serde_json::from_str(r#"{"kind":"rewritten","text":"t","why":"w"}"#).unwrap();
+        assert_eq!(c.kind, ChangeKind::Rewritten);
+        assert!(
+            serde_json::from_str::<Change>(r#"{"kind":"moved","text":"t","why":"w"}"#).is_err()
+        );
+    }
+
+    #[test]
+    fn anchor_json_roundtrip() {
+        for a in [
+            Anchor::Draft {
+                version: 2,
+                quote: "q".into(),
+            },
+            Anchor::Diff {
+                permalink: "p/inbox/a".into(),
+                line: "- x".into(),
+            },
+        ] {
+            let j = serde_json::to_string(&a).unwrap();
+            assert_eq!(serde_json::from_str::<Anchor>(&j).unwrap(), a);
+        }
+        assert_eq!(
+            serde_json::to_string(&Anchor::Draft {
+                version: 1,
+                quote: "q".into()
+            })
+            .unwrap(),
+            r#"{"kind":"draft","version":1,"quote":"q"}"#
+        );
     }
 }

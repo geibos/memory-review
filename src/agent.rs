@@ -649,6 +649,7 @@ impl Agent {
                         .rationale
                         .clone()
                         .unwrap_or_else(|| card.rationale.clone()),
+                    changes: Some(Vec::new()),
                 };
                 let v = p.validate(&ClaimContext {
                     origin: &origin,
@@ -820,7 +821,7 @@ mod tests {
 
     fn promote(origin: &str) -> Value {
         json!({"action": "promote", "sources": [origin], "target_dir": "infra",
-               "target_title": "Clean title", "draft": "- [fact] clean", "rationale": "Useful."})
+               "target_title": "Clean title", "draft": "- [fact] clean", "changes": [], "rationale": "Useful."})
     }
 
     #[tokio::test]
@@ -869,7 +870,7 @@ mod tests {
         let b = w.mem.add("inbox", "B", "- [fact] same topic 2");
         w.llm.push_tool(
             json!({"action": "merge", "sources": [a, b], "target_dir": "infra",
-            "target_title": "Topic", "draft": "- [fact] merged", "rationale": "Same topic."}),
+            "target_title": "Topic", "draft": "- [fact] merged", "changes": [], "rationale": "Same topic."}),
         );
 
         let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
@@ -899,7 +900,7 @@ mod tests {
         w.agent().triage(&b).await.unwrap();
 
         let steal = json!({"action": "merge", "sources": [a, b], "target_dir": "infra",
-            "target_title": "T", "draft": "d", "rationale": "r"});
+            "target_title": "T", "draft": "d", "changes": [], "rationale": "r"});
         w.llm.push_tool(steal.clone());
         w.llm.push_tool(steal);
         assert!(w.agent().triage(&a).await.is_err());
@@ -922,7 +923,7 @@ mod tests {
             .add("inbox", "B", "- [fact] b, already verified by hand");
         w.mem.move_to(&b, "verified/ops");
         let grab = json!({"action": "merge", "sources": [a, b], "target_dir": "infra",
-            "target_title": "T", "draft": "d", "rationale": "r"});
+            "target_title": "T", "draft": "d", "changes": [], "rationale": "r"});
         w.llm.push_tool(grab.clone());
         w.llm.push_tool(grab);
         assert!(w.agent().triage(&a).await.is_err());
@@ -1100,7 +1101,7 @@ mod tests {
         let b = w.mem.add("inbox", "B", "- [fact] b");
         w.llm.push_tool(
             json!({"action": "merge", "sources": [a, b], "target_dir": "infra",
-            "target_title": "T", "draft": "d", "rationale": "r"}),
+            "target_title": "T", "draft": "d", "changes": [], "rationale": "r"}),
         );
         let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
             panic!()

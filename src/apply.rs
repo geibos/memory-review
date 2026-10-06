@@ -311,6 +311,7 @@ mod tests {
             draft: writes.then(|| "- [fact] final".into()),
             tags: vec!["x".into()],
             rationale: "r".into(),
+            changes: vec![],
         };
         db.call(move |c| db::insert_proposal(c, &NewProposal { v, sources: rows }))
             .await

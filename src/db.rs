@@ -566,6 +566,7 @@ mod tests {
                 draft: Some("- [fact] x".into()),
                 tags: vec!["a".into()],
                 rationale: "r".into(),
+                changes: vec![],
             },
             sources: perms.iter().map(|p| src(p)).collect(),
         }
