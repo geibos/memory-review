@@ -59,6 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let state = AppState {
         model,
         catalog: llm_catalog,
+        models_cache: Default::default(),
         cfg: Arc::clone(&cfg),
         db,
         memory,

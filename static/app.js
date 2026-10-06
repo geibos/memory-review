@@ -82,6 +82,17 @@
     if (el && !el.disabled) el.click();
   }
 
+  // Buttons with data-confirm need a second press within 3 seconds.
+  document.addEventListener("click", (e) => {
+    const b = e.target.closest("button[data-confirm]");
+    if (!b || b.classList.contains("armed")) return;
+    e.preventDefault();
+    const label = b.textContent;
+    b.classList.add("armed");
+    b.textContent = b.dataset.confirm;
+    setTimeout(() => { b.classList.remove("armed"); b.textContent = label; }, 3000);
+  }, true);
+
   document.addEventListener("click", (e) => {
     if (e.target.closest("#theme-toggle")) cycleTheme();
     if (e.target.closest("#act-accept")) { e.preventDefault(); pressAccept(); }

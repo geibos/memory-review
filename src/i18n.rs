@@ -95,6 +95,11 @@ strings! {
     draft_changed: "The draft changed since you opened it; look at the new version first.", "Чистовик обновился с тех пор, как вы его открыли, — сначала посмотрите новую версию.";
     show_removed: "show", "показать";
     from_source: "from", "из";
+    reprocess: "Reprocess", "Переразобрать";
+    reprocess_all: "Reprocess all open cards with this model", "Переразобрать все открытые карточки этой моделью";
+    reprocess_all_hint: "Cards to review, snoozed and with changed sources. Threads are kept; each card gets a new draft version.", "Карточки «к ревью», «отложено» и «исходник изменился». Треды сохраняются, у каждой карточки будет новая версия чистовика.";
+    press_again: "Press again to confirm", "Нажмите ещё раз для подтверждения";
+    requeued: "Sent for reprocessing:", "Отправлено на переразбор:";
 }
 
 pub fn strings(lang: Lang) -> &'static Strings {

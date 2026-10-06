@@ -20,6 +20,7 @@
 <main class="settings">
   <h1>{{ t.settings_title }}</h1>
   {% if saved %}<div class="notice info" role="status">{{ t.saved }}</div>{% endif %}
+  {% if let Some(n) = requeued %}<div class="notice info" role="status">{{ t.requeued }} {{ n }}</div>{% endif %}
   {% if let Some(e) = error %}<div class="notice err">{{ e }}</div>{% endif %}
   {% if !catalog_ok %}<div class="notice warn">{{ t.models_unavailable }}</div>{% endif %}
   <form method="post" action="/settings" class="settings-form">
@@ -32,6 +33,14 @@
     <label>{{ t.endpoint_label }}</label>
     <div class="mono readonly">{{ endpoint }}</div>
     <div><button class="btn primary" type="submit">{{ t.save }}</button></div>
+  </form>
+  <form method="post" action="/reprocess-all" class="settings-form reprocess-all">
+    <label for="reprocess-model">{{ t.reprocess_all }}</label>
+    <select id="reprocess-model" name="model">
+      {% for m in models %}<option value="{{ m }}"{% if m.as_str() == current.as_str() %} selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+    <p class="meta">{{ t.reprocess_all_hint }}</p>
+    <div><button class="btn warn" type="submit" data-confirm="{{ t.press_again }}" {% if reprocessable == 0 %}disabled{% endif %}>{{ t.reprocess }} · {{ reprocessable }}</button></div>
   </form>
 </main>
 </div>

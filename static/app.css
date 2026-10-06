@@ -259,3 +259,9 @@ kbd { font-size: 10px; border: 1px solid currentColor; border-bottom-width: 2px;
 .card-head .path { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-head .sp { flex: 0; }
 .md mark.more::after { display: none; }
+
+/* Reprocess */
+.reprocess { display: inline-flex; gap: 6px; align-items: center; }
+.reprocess select { font: 12px "JetBrains Mono", monospace; color: var(--text); background: var(--mantle); border: 1px solid var(--surface1); border-radius: 8px; padding: 5px 6px; max-width: 190px; }
+.reprocess-all { margin-top: 28px; padding-top: 18px; border-top: 1px dashed var(--surface1); }
+.btn.armed { box-shadow: 0 0 0 3px color-mix(in srgb, var(--peach) 40%, transparent); }

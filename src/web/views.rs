@@ -107,6 +107,10 @@ pub struct CardView {
     pub can_retry: bool,
     pub can_comment: bool,
     pub can_send_any: bool,
+    pub can_reprocess: bool,
+    /// Filled by `load_card`: models offered for reprocessing.
+    pub models: Vec<String>,
+    pub current_model: String,
 }
 
 #[derive(Template)]
@@ -131,6 +135,9 @@ pub struct SettingsPage<'a> {
     pub catalog_ok: bool,
     pub saved: bool,
     pub error: Option<String>,
+    /// Open cards that "reprocess all" would send to the agent.
+    pub reprocessable: usize,
+    pub requeued: Option<usize>,
 }
 
 #[derive(Template)]
@@ -453,6 +460,9 @@ pub fn card_view(
         can_retry: p.status == Status::Applying,
         can_comment: can_comment(p.status),
         can_send_any: p.status == Status::Ready,
+        can_reprocess: matches!(p.status, Status::Ready | Status::Snoozed | Status::Stale),
+        models: Vec::new(),
+        current_model: String::new(),
     }
 }
 
@@ -470,7 +480,41 @@ pub async fn load_card(
             Ok(Some((p, db::sources(c, id)?, db::messages(c, id)?)))
         })
         .await?;
-    Ok(loaded.map(|(p, src, msgs)| card_view(s.t, &s.cfg.verified_dir, &p, &src, &msgs, notice)))
+    let Some((p, src, msgs)) = loaded else {
+        return Ok(None);
+    };
+    let mut card = card_view(s.t, &s.cfg.verified_dir, &p, &src, &msgs, notice);
+    if card.can_reprocess {
+        card.models = model_list(s).await.0;
+        card.current_model = crate::llm::current_model(&s.model);
+    }
+    Ok(Some(card))
+}
+
+/// Models offered by the endpoint (cached for 5 minutes) with the current one
+/// always included; `false` if the endpoint could not be asked.
+pub async fn model_list(s: &AppState) -> (Vec<String>, bool) {
+    const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+    let current = crate::llm::current_model(&s.model);
+    let mut cache = s.models_cache.lock().await;
+    let (mut models, ok) = match cache.as_ref() {
+        Some((at, m)) if at.elapsed() < TTL => (m.clone(), true),
+        _ => match s.catalog.list_models().await {
+            Ok(m) => {
+                *cache = Some((std::time::Instant::now(), m.clone()));
+                (m, true)
+            }
+            Err(e) => {
+                tracing::warn!("listing models failed: {e:#}");
+                (Vec::new(), false)
+            }
+        },
+    };
+    drop(cache);
+    if !models.contains(&current) {
+        models.insert(0, current);
+    }
+    (models, ok)
 }
 
 #[cfg(test)]

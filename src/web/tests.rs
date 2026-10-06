@@ -71,6 +71,7 @@ fn setup_with(lang: &str, catalog: Option<Vec<String>>) -> T {
         t,
         model: crate::llm::model_handle("m"),
         catalog: Arc::new(crate::llm::fake::FakeCatalog(catalog)),
+        models_cache: Default::default(),
     };
     T { state, mem, llm }
 }
@@ -336,9 +337,18 @@ async fn snooze_and_regenerate_routes() {
     let id = t.card(Action::Promote, &[&a]).await;
     t.post(&format!("/p/{id}/snooze"), "").await;
     assert_eq!(t.status(id).await, Status::Snoozed);
-    // Regenerate only applies to stale cards.
+    // A snoozed card can be reprocessed; an accepted one cannot.
     t.post(&format!("/p/{id}/regenerate"), "").await;
-    assert_eq!(t.status(id).await, Status::Snoozed);
+    assert_ne!(t.status(id).await, Status::Snoozed);
+    let b = t.mem.add("inbox", "B", "b");
+    let done = t.card(Action::Promote, &[&b]).await;
+    t.state
+        .db
+        .call(move |c| db::cas_status(c, done, Status::Ready, Status::Accepted))
+        .await
+        .unwrap();
+    t.post(&format!("/p/{done}/regenerate"), "").await;
+    assert_eq!(t.status(done).await, Status::Accepted);
 }
 
 #[tokio::test]
@@ -580,4 +590,122 @@ async fn accept_without_version_is_refused() {
     let (_, frag, _) = t.post(&format!("/p/{id}/accept"), "").await;
     assert!(frag.contains(t.state.t.draft_changed), "{frag}");
     assert_eq!(t.status(id).await, Status::Ready);
+}
+
+fn promote_reply(permalink: &str) -> serde_json::Value {
+    json!({"action": "promote", "sources": [permalink], "target_dir": "redo",
+           "target_title": "Redone", "draft": "- [fact] redone", "rationale": "r", "changes": []})
+}
+
+async fn wait_finished(rx: &mut tokio::sync::broadcast::Receiver<AgentEvent>, n: usize) {
+    let mut done = 0;
+    while done < n {
+        match tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            AgentEvent::Finished(_) => done += 1,
+            AgentEvent::Failed(e) => panic!("{e}"),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn card_has_reprocess_control_with_models() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let (_, frag) = t.htmx_get(&format!("/p/{id}")).await;
+    assert!(
+        frag.contains(&format!(r#"hx-post="/p/{id}/regenerate""#)),
+        "{frag}"
+    );
+    assert!(frag.contains(r#"<option value="other-model""#), "{frag}");
+    assert!(frag.contains(r#"<option value="m" selected"#), "{frag}");
+}
+
+#[tokio::test]
+async fn reprocess_ready_card_with_chosen_model() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    t.llm.push_tool(promote_reply(&a));
+    let mut rx = t.state.agent.events.subscribe();
+    let (s, _, _) = t
+        .post(&format!("/p/{id}/regenerate"), "model=other-model")
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    wait_finished(&mut rx, 1).await;
+    let p = t
+        .state
+        .db
+        .call(move |c| db::get_proposal(c, id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((p.status, p.version), (Status::Ready, 2));
+    assert_eq!(p.target_dir.as_deref(), Some("redo"));
+    assert_eq!(
+        t.llm.models.lock().unwrap().last().map(String::as_str),
+        Some("other-model")
+    );
+}
+
+#[tokio::test]
+async fn reprocess_rejects_bad_model() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let (s, _, _) = t.post(&format!("/p/{id}/regenerate"), "model=a+b").await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    assert_eq!(t.status(id).await, Status::Ready);
+}
+
+#[tokio::test]
+async fn reprocess_all_enqueues_only_open_cards() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let b = t.mem.add("inbox", "B", "b");
+    let c = t.mem.add("inbox", "C", "c");
+    let ready = t.card(Action::Promote, &[&a]).await;
+    let snoozed = t.card(Action::Promote, &[&b]).await;
+    let done = t.card(Action::Promote, &[&c]).await;
+    t.state
+        .db
+        .call(move |cn| db::cas_status(cn, snoozed, Status::Ready, Status::Snoozed))
+        .await
+        .unwrap();
+    t.state
+        .db
+        .call(move |cn| db::cas_status(cn, done, Status::Ready, Status::Accepted))
+        .await
+        .unwrap();
+    t.llm.push_tool(promote_reply(&a));
+    t.llm.push_tool(promote_reply(&b));
+    let mut rx = t.state.agent.events.subscribe();
+    let (s, _, headers) = t.post("/reprocess-all", "model=other-model").await;
+    assert_eq!(s, StatusCode::SEE_OTHER);
+    assert_eq!(headers["location"], "/settings?requeued=2");
+    wait_finished(&mut rx, 2).await;
+    assert_eq!(t.status(ready).await, Status::Ready);
+    assert_eq!(t.status(snoozed).await, Status::Ready);
+    assert_eq!(t.status(done).await, Status::Accepted);
+    assert_eq!(
+        *t.llm.models.lock().unwrap(),
+        ["other-model", "other-model"]
+    );
+}
+
+#[tokio::test]
+async fn settings_offers_reprocess_all_with_count() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    t.card(Action::Promote, &[&a]).await;
+    let (_, page) = t.get("/settings").await;
+    assert!(page.contains(r#"action="/reprocess-all""#), "{page}");
+    assert!(page.contains("· 1"), "{page}");
+    let (_, page) = t.get("/settings?requeued=3").await;
+    assert!(page.contains(t.state.t.requeued), "{page}");
 }

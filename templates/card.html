@@ -9,8 +9,11 @@
     {% if c.can_snooze %}
     <form hx-post="/p/{{ c.id }}/snooze" hx-target="#card" hx-swap="outerHTML"><button class="btn" id="act-snooze" type="submit">{{ t.snooze }} <kbd>S</kbd></button></form>
     {% endif %}
-    {% if c.can_regenerate %}
-    <form hx-post="/p/{{ c.id }}/regenerate" hx-target="#card" hx-swap="outerHTML"><button class="btn warn" id="act-regenerate" type="submit">{{ t.regenerate }} <kbd>R</kbd></button></form>
+    {% if c.can_reprocess %}
+    <form class="reprocess" hx-post="/p/{{ c.id }}/regenerate" hx-target="#card" hx-swap="outerHTML">
+      <select name="model" class="mono" title="{{ t.model_label }}" aria-label="{{ t.model_label }}">{% for m in c.models %}<option value="{{ m }}"{% if m.as_str() == c.current_model.as_str() %} selected{% endif %}>{{ m }}</option>{% endfor %}</select>
+      <button class="btn{% if c.can_regenerate %} warn{% endif %}" id="act-regenerate" type="submit">{{ t.reprocess }} <kbd>R</kbd></button>
+    </form>
     {% endif %}
     {% if c.can_retry %}
     <form hx-post="/p/{{ c.id }}/retry" hx-target="#card" hx-swap="outerHTML"><button class="btn warn" id="act-retry" type="submit">{{ t.retry }}</button></form>

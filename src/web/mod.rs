@@ -37,7 +37,11 @@ pub struct AppState {
     /// Model in use; shared with the LLM client.
     pub model: ModelHandle,
     pub catalog: Arc<dyn ModelCatalog>,
+    /// Model list from the endpoint, kept for a few minutes.
+    pub models_cache: ModelsCache,
 }
+
+pub type ModelsCache = Arc<tokio::sync::Mutex<Option<(std::time::Instant, Vec<String>)>>>;
 
 pub fn router(state: AppState) -> Router {
     Router::new()
@@ -49,6 +53,7 @@ pub fn router(state: AppState) -> Router {
             "/settings",
             get(handlers::settings).post(handlers::save_settings),
         )
+        .route("/reprocess-all", post(handlers::reprocess_all))
         .route("/triage", post(handlers::triage))
         .route("/p/{id}/comment", post(handlers::comment))
         .route("/p/{id}/accept", post(handlers::accept))

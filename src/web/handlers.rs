@@ -168,6 +168,7 @@ async fn hand_to_agent(
     from: Status,
     ev: Event,
     job: Job,
+    back_to: Status,
 ) -> Result<Option<String>> {
     let s = s.clone();
     let task = tokio::spawn(async move {
@@ -178,12 +179,7 @@ async fn hand_to_agent(
             return Ok(None);
         }
         s.db.call(move |c| {
-            db::advance(
-                c,
-                id,
-                Status::AgentWorking,
-                &Event::AgentFailed { back_to: from },
-            )
+            db::advance(c, id, Status::AgentWorking, &Event::AgentFailed { back_to })
         })
         .await?;
         Ok(Some(s.t.queue_full.to_string()))
@@ -262,8 +258,15 @@ pub async fn comment(
     if f.send == "1" {
         let pending = s.db.call(move |c| db::pending_human(c, id)).await?;
         if !pending.is_empty() {
-            notice =
-                hand_to_agent(&s, id, Status::Ready, Event::SendToAgent, Job::Reply { id }).await?;
+            notice = hand_to_agent(
+                &s,
+                id,
+                Status::Ready,
+                Event::SendToAgent,
+                Job::Reply { id },
+                Status::Ready,
+            )
+            .await?;
         }
     }
     card_response(&s, load_card(&s, id, notice).await?)
@@ -328,39 +331,111 @@ pub async fn snooze(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Re
     card_response(&s, load_card(&s, id, None).await?)
 }
 
-pub async fn regenerate(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Response> {
-    let notice = hand_to_agent(
-        &s,
+#[derive(Deserialize)]
+pub struct ModelForm {
+    #[serde(default)]
+    model: String,
+}
+
+/// Empty means "the current model"; `Err` for a malformed name.
+fn chosen_model(raw: &str) -> std::result::Result<Option<String>, ()> {
+    let name = raw.trim();
+    if name.is_empty() {
+        Ok(None)
+    } else if valid_model(name) {
+        Ok(Some(name.to_string()))
+    } else {
+        Err(())
+    }
+}
+
+/// Sends an open card back to the agent; `false` if it is not reprocessable.
+async fn reprocess(
+    s: &AppState,
+    id: i64,
+    status: Status,
+    model: Option<String>,
+) -> Result<Option<String>> {
+    // A stale card fails back to stale; ready and snoozed cards to ready.
+    let back_to = if status == Status::Stale {
+        Status::Stale
+    } else {
+        Status::Ready
+    };
+    hand_to_agent(
+        s,
         id,
-        Status::Stale,
+        status,
         Event::Regenerate,
-        Job::Regenerate {
-            id,
-            model: None,
-            back_to: Status::Stale,
-        },
+        Job::Regenerate { id, model, back_to },
+        back_to,
     )
-    .await?;
+    .await
+}
+
+pub async fn regenerate(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Form(f): Form<ModelForm>,
+) -> Result<Response> {
+    let Some(status) = status_of(&s, id).await? else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let Ok(model) = chosen_model(&f.model) else {
+        return Ok((StatusCode::BAD_REQUEST, s.t.bad_model).into_response());
+    };
+    let mut notice = None;
+    if matches!(status, Status::Ready | Status::Snoozed | Status::Stale) {
+        notice = reprocess(&s, id, status, model).await?;
+    }
     card_response(&s, load_card(&s, id, notice).await?)
+}
+
+async fn reprocessable(s: &AppState) -> Result<Vec<(i64, Status)>> {
+    Ok(s.db
+        .call(|c| db::list_queue(c, QueueFilter::Open))
+        .await?
+        .into_iter()
+        .filter(|i| matches!(i.status, Status::Ready | Status::Snoozed | Status::Stale))
+        .map(|i| (i.id, i.status))
+        .collect())
+}
+
+pub async fn reprocess_all(
+    State(s): State<AppState>,
+    Form(f): Form<ModelForm>,
+) -> Result<Response> {
+    let Ok(model) = chosen_model(&f.model) else {
+        return Ok((StatusCode::BAD_REQUEST, s.t.bad_model).into_response());
+    };
+    let mut cards = reprocessable(&s).await?;
+    cards.sort_by_key(|(id, _)| *id);
+    let mut queued = 0;
+    for (id, status) in cards {
+        if reprocess(&s, id, status, model.clone()).await?.is_none() {
+            queued += 1;
+        }
+    }
+    tracing::info!(queued, model = ?model, "reprocess all");
+    let location = format!("/settings?requeued={queued}");
+    Ok((StatusCode::SEE_OTHER, [("location", location)]).into_response())
 }
 
 #[derive(Deserialize)]
 pub struct SettingsQuery {
     saved: Option<String>,
+    requeued: Option<usize>,
 }
 
-async fn settings_page(s: &AppState, saved: bool, error: Option<String>) -> Result<String> {
+async fn settings_page(
+    s: &AppState,
+    saved: bool,
+    requeued: Option<usize>,
+    error: Option<String>,
+) -> Result<String> {
     let current = crate::llm::current_model(&s.model);
-    let (mut models, catalog_ok) = match s.catalog.list_models().await {
-        Ok(m) => (m, true),
-        Err(e) => {
-            tracing::warn!("listing models failed: {e:#}");
-            (Vec::new(), false)
-        }
-    };
-    if !models.contains(&current) {
-        models.insert(0, current.clone());
-    }
+    let (models, catalog_ok) = super::views::model_list(s).await;
+    let reprocessable = reprocessable(s).await?.len();
     Ok(SettingsPage {
         v: super::asset_version(),
         t: s.t,
@@ -371,6 +446,8 @@ async fn settings_page(s: &AppState, saved: bool, error: Option<String>) -> Resu
         catalog_ok,
         saved,
         error,
+        reprocessable,
+        requeued,
     }
     .render()?)
 }
@@ -379,7 +456,7 @@ pub async fn settings(
     State(s): State<AppState>,
     Query(q): Query<SettingsQuery>,
 ) -> Result<Response> {
-    Ok(Html(settings_page(&s, q.saved.is_some(), None).await?).into_response())
+    Ok(Html(settings_page(&s, q.saved.is_some(), q.requeued, None).await?).into_response())
 }
 
 #[derive(Deserialize)]
@@ -406,7 +483,7 @@ pub async fn save_settings(
     }
     .to_string();
     if !valid_model(&name) {
-        let page = settings_page(&s, false, Some(s.t.bad_model.to_string())).await?;
+        let page = settings_page(&s, false, None, Some(s.t.bad_model.to_string())).await?;
         return Ok((StatusCode::BAD_REQUEST, Html(page)).into_response());
     }
     let stored = name.clone();
