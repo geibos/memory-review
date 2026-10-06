@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::{broadcast, mpsc};
 
 use crate::db::{self, ClaimConflict, Db, SourceRow};
-use crate::domain::{AgentProposal, ClaimContext, Event, Status, ValidatedProposal};
+use crate::domain::{AgentProposal, Anchor, ClaimContext, Event, Status, ValidatedProposal};
 use crate::llm::{ChatMessage, Llm, LlmOutcome, ToolSpec};
 use crate::memory::{InboxEntry, MemoryApi, inbox_permalinks};
 use crate::note::{RawNote, body, content_hash, folder_of};
@@ -130,6 +130,40 @@ pub async fn untriaged(
         .collect())
 }
 
+/// How a human comment is shown to the model, with what it points at.
+pub fn format_comment(m: &db::MessageRow) -> String {
+    match &m.anchor {
+        None => m.body.clone(),
+        Some(Anchor::Draft { version, quote }) => {
+            format!("Comment on draft v{version} fragment “{quote}”: {}", m.body)
+        }
+        Some(Anchor::Diff { permalink, line }) => {
+            format!(
+                "Comment on diff line of `{permalink}`: “{line}”: {}",
+                m.body
+            )
+        }
+    }
+}
+
+fn changes_schema() -> Value {
+    json!({
+        "type": "array",
+        "maxItems": crate::domain::MAX_CHANGES,
+        "description": "Every meaningful change against the source notes (not formatting).",
+        "items": {
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "enum": ["added", "rewritten", "removed"] },
+                "text": { "type": "string", "description": "Exact quote: from the draft for added/rewritten, from a source for removed." },
+                "source": { "type": "string", "description": "Permalink of the source note; required for removed." },
+                "why": { "type": "string", "description": "One sentence for the reviewer." }
+            },
+            "required": ["kind", "text", "why"]
+        }
+    })
+}
+
 fn clip(s: &str, max: usize) -> String {
     match s.char_indices().nth(max) {
         Some((i, _)) => format!("{}\n…[truncated]", &s[..i]),
@@ -160,7 +194,8 @@ fn proposal_tool() -> ToolSpec {
                 "target_title": { "type": "string" },
                 "draft": { "type": "string", "description": "Full markdown of the verified note, without frontmatter." },
                 "tags": { "type": "array", "items": { "type": "string" } },
-                "rationale": { "type": "string", "description": "1-3 sentences for the reviewer." }
+                "rationale": { "type": "string", "description": "1-3 sentences for the reviewer." },
+                "changes": changes_schema()
             },
             "required": ["action", "sources", "rationale"]
         }),
@@ -181,7 +216,8 @@ fn reply_tool() -> ToolSpec {
                 "target_title": { "type": "string" },
                 "draft": { "type": "string" },
                 "tags": { "type": "array", "items": { "type": "string" } },
-                "rationale": { "type": "string", "description": "Updated 1-3 sentence rationale when the proposal changes." }
+                "rationale": { "type": "string", "description": "Updated 1-3 sentence rationale when the proposal changes." },
+                "changes": changes_schema()
             },
             "required": ["reply"]
         }),
@@ -205,6 +241,8 @@ struct ReplyArgs {
     tags: Option<Vec<String>>,
     #[serde(default)]
     rationale: Option<String>,
+    #[serde(default)]
+    changes: Option<Vec<crate::domain::Change>>,
 }
 
 impl ReplyArgs {
@@ -216,6 +254,7 @@ impl ReplyArgs {
             || self.draft.is_some()
             || self.tags.is_some()
             || self.rationale.is_some()
+            || self.changes.is_some()
     }
 }
 
@@ -527,7 +566,14 @@ impl Agent {
         let thread_text = thread
             .iter()
             .filter(|m| !pending_ids.contains(&m.id))
-            .map(|m| format!("**{} (draft v{})**: {}", m.author, m.draft_version, m.body))
+            .map(|m| {
+                format!(
+                    "**{} (draft v{})**: {}",
+                    m.author,
+                    m.draft_version,
+                    format_comment(m)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n");
         let user = render(
@@ -559,6 +605,18 @@ impl Agent {
                     },
                 ),
                 ("rationale", &card.rationale),
+                (
+                    "changes",
+                    &if card.changes.is_empty() {
+                        "(none)".into()
+                    } else {
+                        card.changes
+                            .iter()
+                            .map(|c| serde_json::to_string(c).unwrap_or_default())
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    },
+                ),
                 (
                     "draft",
                     card.draft
@@ -598,7 +656,7 @@ impl Agent {
                     "pending",
                     &pending
                         .iter()
-                        .map(|m| format!("- {}", m.body))
+                        .map(|m| format!("- {}", format_comment(m)))
                         .collect::<Vec<_>>()
                         .join("\n"),
                 ),
@@ -649,7 +707,13 @@ impl Agent {
                         .rationale
                         .clone()
                         .unwrap_or_else(|| card.rationale.clone()),
-                    changes: Some(Vec::new()),
+                    // A new draft needs its own change notes; otherwise the
+                    // notes of the current draft still apply.
+                    changes: if r.draft.is_some() {
+                        r.changes.clone()
+                    } else {
+                        Some(card.changes.clone())
+                    },
                 };
                 let v = p.validate(&ClaimContext {
                     origin: &origin,
@@ -676,10 +740,11 @@ impl Agent {
                 .call(move |c| db::update_draft(c, id, &v, &new_rows))
                 .await?;
         }
+        let model = self.llm.model();
         self.db
             .call(move |c| {
                 db::mark_sent_ids(c, &pending_ids)?;
-                db::add_message(c, id, "agent", &reply, true)
+                db::add_message_ext(c, id, "agent", &reply, true, None, Some(&model))
             })
             .await?;
         Ok(())
@@ -992,7 +1057,7 @@ mod tests {
         w.comment(id, "Put it under ops").await;
         w.set_working(id, Status::Ready).await;
         w.llm.push_tool(
-            json!({"reply": "Moved to ops.", "target_dir": "ops", "draft": "- [fact] v2"}),
+            json!({"reply": "Moved to ops.", "target_dir": "ops", "draft": "- [fact] v2", "changes": []}),
         );
 
         w.agent().reply(id).await.unwrap();
@@ -1027,7 +1092,7 @@ mod tests {
         w.set_working(id, Status::Ready).await;
         w.llm
             .push_tool(json!({"reply": "Done.", "draft": "- [fact] no numbers",
-                               "rationale": "Numbers removed at the reviewer's request."}));
+                               "rationale": "Numbers removed at the reviewer's request.", "changes": []}));
         w.agent().reply(id).await.unwrap();
         assert_eq!(
             w.card(id).await.rationale,
@@ -1233,5 +1298,166 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    fn ch(kind: &str, text: &str) -> Value {
+        json!({"kind": kind, "text": text, "source": "p/inbox/a", "why": "because"})
+    }
+
+    #[tokio::test]
+    async fn triage_stores_changes() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        let mut p = promote(&a);
+        p["changes"] = json!([ch("added", "- [fact] clean"), ch("removed", "- [fact] a")]);
+        w.llm.push_tool(p);
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        let card = w.card(id).await;
+        assert_eq!(card.changes.len(), 2);
+        assert_eq!(card.changes[1].source.as_deref(), Some("p/inbox/a"));
+    }
+
+    #[tokio::test]
+    async fn missing_changes_retries() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        let mut bad = promote(&a);
+        bad.as_object_mut().unwrap().remove("changes");
+        w.llm.push_tool(bad);
+        w.llm.push_tool(promote(&a));
+        assert!(matches!(
+            w.agent().triage(&a).await.unwrap(),
+            TriageResult::Created(_)
+        ));
+        let seen = w.llm.seen.lock().unwrap();
+        assert!(seen[1].last().unwrap().content.contains("changes"));
+    }
+
+    #[tokio::test]
+    async fn reply_new_draft_requires_changes_and_stores_them() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "Add the date").await;
+        w.set_working(id, Status::Ready).await;
+        w.llm
+            .push_tool(json!({"reply": "Added.", "draft": "- [fact] clean on 05.10"}));
+        w.llm.push_tool(
+            json!({"reply": "Added.", "draft": "- [fact] clean on 05.10",
+                               "changes": [ch("rewritten", "clean on 05.10")]}),
+        );
+        w.agent().reply(id).await.unwrap();
+        let card = w.card(id).await;
+        assert_eq!(card.version, 2);
+        assert_eq!(card.changes[0].text, "clean on 05.10");
+    }
+
+    #[tokio::test]
+    async fn reply_without_draft_keeps_changes() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        let mut p = promote(&a);
+        p["changes"] = json!([ch("added", "- [fact] clean")]);
+        w.llm.push_tool(p);
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "Other folder").await;
+        w.set_working(id, Status::Ready).await;
+        w.llm
+            .push_tool(json!({"reply": "Moved.", "target_dir": "ops"}));
+        w.agent().reply(id).await.unwrap();
+        let card = w.card(id).await;
+        assert_eq!(card.target_dir.as_deref(), Some("ops"));
+        assert_eq!(card.changes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn agent_message_records_model() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "?").await;
+        w.set_working(id, Status::Ready).await;
+        w.llm.push_tool(json!({"reply": "Answer."}));
+        w.agent().reply(id).await.unwrap();
+        let last = w.thread(id).await.pop().unwrap();
+        assert_eq!(last.model.as_deref(), Some("fake-model"));
+    }
+
+    #[tokio::test]
+    async fn anchored_comment_reaches_prompt() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.db.call(move |c| {
+            db::add_message_ext(
+                c,
+                id,
+                "human",
+                "wrong",
+                false,
+                Some(&Anchor::Draft {
+                    version: 1,
+                    quote: "QUOTED BIT".into(),
+                }),
+                None,
+            )
+        })
+        .await
+        .unwrap();
+        w.set_working(id, Status::Ready).await;
+        w.llm.push_tool(json!({"reply": "Fixed."}));
+        w.agent().reply(id).await.unwrap();
+        let seen = w.llm.seen.lock().unwrap();
+        assert!(
+            seen[1][1].content.contains("“QUOTED BIT”"),
+            "{}",
+            seen[1][1].content
+        );
+    }
+
+    #[test]
+    fn format_comment_variants() {
+        let mut m = db::MessageRow {
+            id: 1,
+            author: "human".into(),
+            body: "text".into(),
+            draft_version: 2,
+            sent: false,
+            created_at: time::OffsetDateTime::UNIX_EPOCH,
+            anchor: None,
+            model: None,
+        };
+        assert_eq!(format_comment(&m), "text");
+        m.anchor = Some(Anchor::Draft {
+            version: 2,
+            quote: "q".into(),
+        });
+        assert_eq!(format_comment(&m), "Comment on draft v2 fragment “q”: text");
+        m.anchor = Some(Anchor::Diff {
+            permalink: "p/inbox/a".into(),
+            line: "- x".into(),
+        });
+        assert_eq!(
+            format_comment(&m),
+            "Comment on diff line of `p/inbox/a`: “- x”: text"
+        );
+    }
+
+    #[test]
+    fn reply_prompt_has_changes_slot() {
+        assert!(Prompts::load(None).unwrap().reply.contains("{{changes}}"));
     }
 }

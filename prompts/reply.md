@@ -13,6 +13,10 @@ the proposal. Call `submit_reply`.
 {{draft}}
 ```
 
+Change notes of this draft:
+
+{{changes}}
+
 ## Source notes as they are now
 
 {{sources}}
@@ -32,4 +36,6 @@ the proposal. Call `submit_reply`.
 Rules for the tool call: `reply` is a short answer to the reviewer in their language. Include
 `action`, `sources`, `target_dir`, `target_title`, `draft`, `tags` or `rationale` only when you
 change them (update `rationale` whenever the old one no longer describes the proposal);
-omitted fields keep their current values. When you change `draft`, send the whole new draft.
+omitted fields keep their current values. When you change `draft`, send the whole new draft
+and a fresh `changes` list describing it against the source notes. Comments may quote a
+fragment of the draft or a diff line — address that fragment.

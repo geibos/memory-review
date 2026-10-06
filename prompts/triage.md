@@ -28,3 +28,4 @@ If the note under review only repeats one of these, propose `delete`.
 Rules for the tool call: `sources` must contain `{{origin_permalink}}`; `promote` has exactly
 one source, `merge` two or more; `target_dir` is a single folder name; `rationale` is one to
 three sentences for the human reviewer, in the language of the notes.
+For `promote` and `merge` include `changes` (see the system message); for `delete` leave it out.
