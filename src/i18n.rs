@@ -74,6 +74,14 @@ strings! {
     queued: "queued", "в очереди";
     sources_n: "sources", "источников";
     queue_full: "The agent queue is full; try again in a minute.", "Очередь агента переполнена, повторите через минуту.";
+    settings_title: "Settings", "Настройки";
+    model_label: "Model", "Модель";
+    model_manual: "or type a model name", "или впишите имя модели";
+    endpoint_label: "Endpoint (from the environment, read-only)", "Эндпоинт (из окружения, только чтение)";
+    models_unavailable: "Could not get the model list from the endpoint; type the name by hand.", "Не удалось получить список моделей с эндпоинта — впишите имя вручную.";
+    save: "Save", "Сохранить";
+    saved: "Saved. The next agent run uses this model.", "Сохранено. Следующий запуск агента пойдёт через эту модель.";
+    bad_model: "Model name must be 1–200 characters without spaces.", "Имя модели — от 1 до 200 символов, без пробелов.";
 }
 
 pub fn strings(lang: Lang) -> &'static Strings {

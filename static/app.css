@@ -189,3 +189,13 @@ kbd { font-size: 10px; border: 1px solid currentColor; border-bottom-width: 2px;
   .keys { display: none; }
 }
 @media (prefers-reduced-motion: reduce) { .spinner { animation: none; } .btn { transition: none; } }
+
+/* Settings */
+.pill.model { text-decoration: none; color: var(--mauve); background: color-mix(in srgb, var(--mauve) 14%, transparent); max-width: 26ch; overflow: hidden; text-overflow: ellipsis; }
+.settings { max-width: 560px; padding: 24px 28px; overflow-y: auto; }
+.settings h1 { font-family: "Source Serif 4", Georgia, serif; font-size: 23px; font-weight: 600; margin: 0 0 16px; }
+.settings-form { display: grid; gap: 8px; }
+.settings-form label { font-size: 12px; color: var(--subtext0); margin-top: 8px; }
+.settings-form select, .settings-form input { font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--surface1); border-radius: 8px; padding: 8px 10px; }
+.settings-form .readonly { padding: 8px 10px; border-radius: 8px; background: var(--crust); color: var(--subtext1); overflow-wrap: anywhere; }
+.settings-form .btn { margin-top: 12px; }

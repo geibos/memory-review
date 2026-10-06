@@ -18,6 +18,7 @@ pub struct HeaderView {
     pub with_agent: usize,
     pub untriaged: usize,
     pub agent_now: Option<String>,
+    pub model: String,
 }
 
 pub struct QueueRow {
@@ -86,6 +87,19 @@ pub struct IndexPage<'a> {
     pub header: HeaderView,
     pub queue: QueueView,
     pub card: Option<CardView>,
+}
+
+#[derive(Template)]
+#[template(path = "settings.html")]
+pub struct SettingsPage<'a> {
+    pub t: &'a Strings,
+    pub header: HeaderView,
+    pub models: Vec<String>,
+    pub current: String,
+    pub endpoint: String,
+    pub catalog_ok: bool,
+    pub saved: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Template)]
@@ -196,6 +210,7 @@ pub async fn header_view(s: &AppState) -> anyhow::Result<HeaderView> {
             }
         };
     Ok(HeaderView {
+        model: crate::llm::current_model(&s.model),
         inbox,
         to_review,
         with_agent: working + queued,

@@ -42,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
         cfg.llm_key.clone(),
         model.clone(),
     ));
+    let llm_catalog: Arc<dyn memory_review::llm::ModelCatalog> = llm.clone();
     let prompts = Arc::new(Prompts::load(cfg.prompts_dir.as_deref())?);
     let agent = Agent {
         memory: memory.clone(),
@@ -56,6 +57,8 @@ async fn main() -> anyhow::Result<()> {
     .spawn();
 
     let state = AppState {
+        model,
+        catalog: llm_catalog,
         cfg: Arc::clone(&cfg),
         db,
         memory,

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="{{ t.html_lang }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>{{ t.settings_title }} · {{ t.app_title }}</title>
+<script>
+  try { var m = localStorage.getItem("mr-theme"); if (m === "light" || m === "dark") document.documentElement.dataset.theme = m; } catch (e) {}
+</script>
+<link rel="preload" href="/static/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23c6a0f6'/%3E%3Cpath d='M9 22V10l7 7 7-7v12' stroke='%2324273a' stroke-width='3' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+<script src="/static/htmx.min.js" defer></script>
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<div class="app">
+{% include "header.html" %}
+<main class="settings">
+  <h1>{{ t.settings_title }}</h1>
+  {% if saved %}<div class="notice info" role="status">{{ t.saved }}</div>{% endif %}
+  {% if let Some(e) = error %}<div class="notice err">{{ e }}</div>{% endif %}
+  {% if !catalog_ok %}<div class="notice warn">{{ t.models_unavailable }}</div>{% endif %}
+  <form method="post" action="/settings" class="settings-form">
+    <label for="model">{{ t.model_label }}</label>
+    <select id="model" name="model">
+      {% for m in models %}<option value="{{ m }}"{% if m.as_str() == current.as_str() %} selected{% endif %}>{{ m }}</option>{% endfor %}
+    </select>
+    <label for="model_manual">{{ t.model_manual }}</label>
+    <input id="model_manual" name="model_manual" class="mono" maxlength="200" autocomplete="off" spellcheck="false">
+    <label>{{ t.endpoint_label }}</label>
+    <div class="mono readonly">{{ endpoint }}</div>
+    <div><button class="btn primary" type="submit">{{ t.save }}</button></div>
+  </form>
+</main>
+</div>
+</body>
+</html>

@@ -24,6 +24,7 @@ use crate::agent::AgentHandle;
 use crate::config::Config;
 use crate::db::Db;
 use crate::i18n::Strings;
+use crate::llm::{ModelCatalog, ModelHandle};
 use crate::memory::MemoryApi;
 
 #[derive(Clone)]
@@ -33,6 +34,9 @@ pub struct AppState {
     pub memory: Arc<dyn MemoryApi>,
     pub agent: AgentHandle,
     pub t: &'static Strings,
+    /// Model in use; shared with the LLM client.
+    pub model: ModelHandle,
+    pub catalog: Arc<dyn ModelCatalog>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -41,6 +45,10 @@ pub fn router(state: AppState) -> Router {
         .route("/header", get(handlers::header))
         .route("/queue", get(handlers::queue))
         .route("/p/{id}", get(handlers::card))
+        .route(
+            "/settings",
+            get(handlers::settings).post(handlers::save_settings),
+        )
         .route("/triage", post(handlers::triage))
         .route("/p/{id}/comment", post(handlers::comment))
         .route("/p/{id}/accept", post(handlers::accept))

@@ -15,7 +15,8 @@ use crate::domain::{Event, Status, can_comment};
 
 use super::AppState;
 use super::views::{
-    CardFragment, HeaderFragment, IndexPage, QueueFragment, header_view, load_card, queue_view,
+    CardFragment, HeaderFragment, IndexPage, QueueFragment, SettingsPage, header_view, load_card,
+    queue_view,
 };
 
 const MAX_COMMENT: usize = 20_000;
@@ -278,4 +279,76 @@ pub async fn regenerate(State(s): State<AppState>, Path(id): Path<i64>) -> Resul
     )
     .await?;
     card_response(&s, load_card(&s, id, notice).await?)
+}
+
+#[derive(Deserialize)]
+pub struct SettingsQuery {
+    saved: Option<String>,
+}
+
+async fn settings_page(s: &AppState, saved: bool, error: Option<String>) -> Result<String> {
+    let current = crate::llm::current_model(&s.model);
+    let (mut models, catalog_ok) = match s.catalog.list_models().await {
+        Ok(m) => (m, true),
+        Err(e) => {
+            tracing::warn!("listing models failed: {e:#}");
+            (Vec::new(), false)
+        }
+    };
+    if !models.contains(&current) {
+        models.insert(0, current.clone());
+    }
+    Ok(SettingsPage {
+        t: s.t,
+        header: header_view(s).await?,
+        models,
+        current,
+        endpoint: s.cfg.llm_url.clone(),
+        catalog_ok,
+        saved,
+        error,
+    }
+    .render()?)
+}
+
+pub async fn settings(
+    State(s): State<AppState>,
+    Query(q): Query<SettingsQuery>,
+) -> Result<Response> {
+    Ok(Html(settings_page(&s, q.saved.is_some(), None).await?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct SettingsForm {
+    #[serde(default)]
+    model: String,
+    #[serde(default)]
+    model_manual: String,
+}
+
+fn valid_model(name: &str) -> bool {
+    !name.is_empty() && name.chars().count() <= 200 && !name.chars().any(char::is_whitespace)
+}
+
+pub async fn save_settings(
+    State(s): State<AppState>,
+    Form(f): Form<SettingsForm>,
+) -> Result<Response> {
+    let manual = f.model_manual.trim();
+    let name = if manual.is_empty() {
+        f.model.as_str()
+    } else {
+        manual
+    }
+    .to_string();
+    if !valid_model(&name) {
+        let page = settings_page(&s, false, Some(s.t.bad_model.to_string())).await?;
+        return Ok((StatusCode::BAD_REQUEST, Html(page)).into_response());
+    }
+    let stored = name.clone();
+    s.db.call(move |c| db::set_setting(c, "model", &stored))
+        .await?;
+    crate::llm::set_model(&s.model, &name);
+    tracing::info!(model = %name, "model changed from the settings page");
+    Ok((StatusCode::SEE_OTHER, [("location", "/settings?saved=1")]).into_response())
 }

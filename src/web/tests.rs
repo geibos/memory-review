@@ -43,6 +43,10 @@ fn config(lang: &str) -> Config {
 }
 
 fn setup_lang(lang: &str) -> T {
+    setup_with(lang, Some(vec!["m".into(), "other-model".into()]))
+}
+
+fn setup_with(lang: &str, catalog: Option<Vec<String>>) -> T {
     let cfg = config(lang);
     let mem: Arc<FakeMemory> = Arc::default();
     let llm: Arc<FakeLlm> = Arc::default();
@@ -65,6 +69,8 @@ fn setup_lang(lang: &str) -> T {
         memory: mem.clone(),
         agent,
         t,
+        model: crate::llm::model_handle("m"),
+        catalog: Arc::new(crate::llm::fake::FakeCatalog(catalog)),
     };
     T { state, mem, llm }
 }
@@ -365,4 +371,91 @@ async fn ru_strings_rendered_when_lang_ru() {
     let (_, page) = t.get("/").await;
     assert!(page.contains("Принять"));
     assert!(page.contains("lang=\"ru\""));
+}
+
+fn model_now(t: &T) -> String {
+    crate::llm::current_model(&t.state.model)
+}
+
+#[tokio::test]
+async fn settings_page_lists_models() {
+    let t = setup();
+    let (s, page) = t.get("/settings").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(page.contains(r#"<option value="other-model""#), "{page}");
+    assert!(page.contains(r#"<option value="m" selected"#), "{page}");
+    assert!(
+        page.contains("http://llm.example.org"),
+        "endpoint shown read-only"
+    );
+    assert!(
+        !page.contains(">k<") && !page.contains("value=\"k\""),
+        "key never shown"
+    );
+}
+
+#[tokio::test]
+async fn settings_without_catalog_allows_manual_model() {
+    let t = setup_with("en", None);
+    let (s, page) = t.get("/settings").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(page.contains(t.state.t.models_unavailable), "{page}");
+    let (s, _, _) = t.post("/settings", "model=&model_manual=custom-1").await;
+    assert_eq!(s, StatusCode::SEE_OTHER);
+    assert_eq!(model_now(&t), "custom-1");
+}
+
+#[tokio::test]
+async fn settings_post_updates_handle_and_db() {
+    let t = setup();
+    let (s, _, headers) = t.post("/settings", "model=other-model&model_manual=").await;
+    assert_eq!(s, StatusCode::SEE_OTHER);
+    assert_eq!(headers["location"], "/settings?saved=1");
+    assert_eq!(model_now(&t), "other-model");
+    let stored = t
+        .state
+        .db
+        .call(|c| db::get_setting(c, "model"))
+        .await
+        .unwrap();
+    assert_eq!(stored.as_deref(), Some("other-model"));
+}
+
+#[tokio::test]
+async fn settings_post_rejects_bad_model() {
+    let t = setup();
+    let long = "x".repeat(201);
+    for form in [
+        "model=&model_manual=".to_string(),
+        "model=a+b&model_manual=".to_string(),
+        format!("model={long}&model_manual="),
+    ] {
+        let (s, _, _) = t.post("/settings", &form).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{form}");
+    }
+    assert_eq!(model_now(&t), "m");
+}
+
+#[tokio::test]
+async fn settings_post_without_origin_forbidden() {
+    let t = setup();
+    let (s, _, _) = t
+        .send(
+            Request::post("/settings")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(Body::from("model=x"))
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(s, StatusCode::FORBIDDEN);
+    assert_eq!(model_now(&t), "m");
+}
+
+#[tokio::test]
+async fn header_shows_model() {
+    let t = setup();
+    crate::llm::set_model(&t.state.model, "shown-model");
+    let (_, h) = t.htmx_get("/header").await;
+    assert!(h.contains("shown-model"), "{h}");
+    assert!(h.contains(r#"href="/settings""#), "{h}");
 }

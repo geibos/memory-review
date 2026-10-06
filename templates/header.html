@@ -5,6 +5,7 @@
   {% if header.with_agent > 0 %}<span class="pill busy">{{ t.pill_agent }} <strong>{{ header.with_agent }}</strong></span>{% endif %}
   {% if let Some(now) = header.agent_now %}<span class="agent-now working"><span class="spinner"></span>{{ now }}</span>{% endif %}
   <span class="sp"></span>
+  <a class="pill model mono" href="/settings" title="{{ t.settings_title }}">{{ header.model }}</a>
   <button class="btn icon" type="button" id="theme-toggle" title="{{ t.theme_toggle }}" aria-label="{{ t.theme_toggle }}">◐</button>
   <form hx-post="/triage" hx-target="#top" hx-swap="outerHTML">
     <button class="btn primary" type="submit" {% if header.untriaged == 0 %}disabled{% endif %}>{{ t.triage_new }} · {{ header.untriaged }}</button>
