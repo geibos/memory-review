@@ -341,7 +341,11 @@ impl Agent {
         check: impl Fn(Value) -> Result<T, String>,
     ) -> anyhow::Result<T> {
         for attempt in 0..2 {
-            let (said, problem) = match self.llm.call_tool(&messages, tool).await? {
+            let (said, problem) = match self
+                .llm
+                .call_tool(&messages, tool, &self.llm.model())
+                .await?
+            {
                 LlmOutcome::ToolCall(v) => match check(v.clone()) {
                     Ok(t) => return Ok(t),
                     Err(e) => (v.to_string(), e),

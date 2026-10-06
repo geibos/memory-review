@@ -65,10 +65,12 @@ pub fn set_model(h: &ModelHandle, model: &str) {
 // async-trait (dyn): held as `Arc<dyn Llm>` so tests can script replies.
 #[async_trait]
 pub trait Llm: Send + Sync {
+    /// Calls `model` with one tool the reply should use.
     async fn call_tool(
         &self,
         messages: &[ChatMessage],
         tool: &ToolSpec,
+        model: &str,
     ) -> anyhow::Result<LlmOutcome>;
 
     /// Name of the model the next call will use.
@@ -113,11 +115,12 @@ impl Llm for LiteLlm {
         &self,
         messages: &[ChatMessage],
         tool: &ToolSpec,
+        model: &str,
     ) -> anyhow::Result<LlmOutcome> {
         // Forced tool choice is not supported for some models behind LiteLLM,
         // so the prompt asks for the call and `auto` lets the model comply.
         let body = json!({
-            "model": current_model(&self.model),
+            "model": model,
             "messages": messages.iter()
                 .map(|m| json!({ "role": m.role, "content": m.content }))
                 .collect::<Vec<_>>(),
@@ -224,6 +227,8 @@ pub mod fake {
     pub struct FakeLlm {
         pub replies: Mutex<VecDeque<anyhow::Result<LlmOutcome>>>,
         pub seen: Mutex<Vec<Vec<ChatMessage>>>,
+        /// Model passed to each call.
+        pub models: Mutex<Vec<String>>,
     }
 
     impl FakeLlm {
@@ -247,8 +252,10 @@ pub mod fake {
             &self,
             messages: &[ChatMessage],
             _tool: &ToolSpec,
+            model: &str,
         ) -> anyhow::Result<LlmOutcome> {
             self.seen.lock().unwrap().push(messages.to_vec());
+            self.models.lock().unwrap().push(model.to_string());
             self.replies
                 .lock()
                 .unwrap()
@@ -342,7 +349,7 @@ mod tests {
             "tool_calls": [{"type": "function", "function": {"name": "submit", "arguments": "{\"x\":\"1\"}"}}]})))])
         .await;
         let out = client(url)
-            .call_tool(&[ChatMessage::user("hi")], &tool())
+            .call_tool(&[ChatMessage::user("hi")], &tool(), "m")
             .await
             .unwrap();
         assert_eq!(out, LlmOutcome::ToolCall(json!({"x": "1"})));
@@ -366,7 +373,7 @@ mod tests {
         )])
         .await;
         let out = client(url)
-            .call_tool(&[ChatMessage::user("hi")], &tool())
+            .call_tool(&[ChatMessage::user("hi")], &tool(), "m")
             .await
             .unwrap();
         assert_eq!(out, LlmOutcome::Text("I think…".into()));
@@ -378,7 +385,7 @@ mod tests {
             "tool_calls": [{"type": "function", "function": {"name": "submit", "arguments": "{oops"}}]})))])
         .await;
         let out = client(url)
-            .call_tool(&[ChatMessage::user("hi")], &tool())
+            .call_tool(&[ChatMessage::user("hi")], &tool(), "m")
             .await
             .unwrap();
         assert_eq!(out, LlmOutcome::Text("{oops".into()));
@@ -395,7 +402,7 @@ mod tests {
         ])
         .await;
         let out = client(url)
-            .call_tool(&[ChatMessage::user("hi")], &tool())
+            .call_tool(&[ChatMessage::user("hi")], &tool(), "m")
             .await
             .unwrap();
         assert_eq!(out, LlmOutcome::Text("ok".into()));
@@ -407,13 +414,13 @@ mod tests {
         let (url, _) = stub(vec![(500, json!({})), (503, json!({}))]).await;
         assert!(
             client(url)
-                .call_tool(&[ChatMessage::user("hi")], &tool())
+                .call_tool(&[ChatMessage::user("hi")], &tool(), "m")
                 .await
                 .is_err()
         );
         let (url, seen) = stub(vec![(400, json!({"error": {"message": "bad request"}}))]).await;
         let e = client(url)
-            .call_tool(&[ChatMessage::user("hi")], &tool())
+            .call_tool(&[ChatMessage::user("hi")], &tool(), "m")
             .await
             .unwrap_err();
         assert!(e.to_string().contains("400"), "{e}");
@@ -421,7 +428,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_uses_current_model() {
+    async fn request_uses_passed_model() {
         let ok = || {
             (
                 200,
@@ -429,19 +436,19 @@ mod tests {
             )
         };
         let (url, seen) = stub(vec![ok(), ok()]).await;
-        let handle = model_handle("first");
+        let handle = model_handle("default");
         let c = LiteLlm::new(url, "k".into(), handle.clone());
-        c.call_tool(&[ChatMessage::user("a")], &tool())
+        c.call_tool(&[ChatMessage::user("a")], &tool(), "first")
             .await
             .unwrap();
         set_model(&handle, "second");
         assert_eq!(c.model(), "second");
-        c.call_tool(&[ChatMessage::user("b")], &tool())
+        c.call_tool(&[ChatMessage::user("b")], &tool(), "other")
             .await
             .unwrap();
         let seen = seen.lock().unwrap();
         assert_eq!(seen[0].1["model"], "first");
-        assert_eq!(seen[1].1["model"], "second");
+        assert_eq!(seen[1].1["model"], "other");
     }
 
     async fn models_stub(status: u16, body: Value) -> (String, Arc<Mutex<Vec<HeaderMap>>>) {
