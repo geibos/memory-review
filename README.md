@@ -22,6 +22,15 @@ and you accept. Accepting writes the draft to `verified/` and removes the inbox 
   notes that have none; “Send to agent” delivers your comments on a card. There is no timer.
 - **Comments are asynchronous**, like a code review: leave several, send them together, the
   answer and a new draft version appear in the thread.
+- **The draft explains itself.** The agent lists every meaningful change it made — added,
+  rewritten, removed — with a one-line reason. The draft view highlights those fragments and
+  shows the reasons in the margin (a summary above the text on narrow screens); the diff is
+  one tab away.
+- **Comment on exactly what you mean.** Select a fragment of the draft (or press `C` with a
+  selection) or click 💬 on a diff line; the agent gets the quote together with your comment.
+- **The model is a setting.** The header shows the model in use; `/settings` lists the models
+  the endpoint offers to your key and switches without a restart. The endpoint and key stay in
+  the environment.
 - **Only “Accept” writes to the vault.** The agent has read-only access to memory. Accept
   writes the verified note first, then deletes the sources; if anything fails half-way, the card
   stays in *applying* and “Retry” finishes the job without duplicating work.
@@ -49,7 +58,7 @@ riding on the proxy's session cookie.
 | `MR_PROJECT` | yes | | Basic Memory project name |
 | `MR_LLM_URL` | yes | | Base URL of an OpenAI-compatible API (`/v1/chat/completions` is appended) |
 | `MR_LLM_KEY` | yes | | API key for it |
-| `MR_MODEL` | yes | | Model name |
+| `MR_MODEL` | yes | | Default model; the settings page overrides it |
 | `MR_PUBLIC_ORIGIN` | yes | | Origin the browser uses, e.g. `https://review.example.org` |
 | `MR_LANG` | | `en` | Interface language: `en` or `ru` |
 | `MR_INBOX_DIR` | | `inbox` | Folder agents write to |
@@ -67,7 +76,7 @@ riding on the proxy's session cookie.
 | `A` | Accept (press twice) |
 | `S` | Snooze |
 | `R` | Regenerate a stale card |
-| `C` | Write a comment |
+| `C` | Comment on the selected draft fragment, or write a general comment |
 | `⌘↵` / `Ctrl↵` | Send comments to the agent |
 
 ## Development
