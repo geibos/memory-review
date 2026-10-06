@@ -113,6 +113,45 @@ pub fn locate(md: &str, quote: &str) -> Option<Vec<Span>> {
     (!spans.is_empty()).then_some(spans)
 }
 
+/// Moves a span start past block syntax (`- `, `1. `, `# `, `> `) when the span
+/// begins its line: a marker in front of that syntax would break the block.
+fn skip_block_prefix(md: &str, start: usize, end: usize) -> usize {
+    let line_start = md[..start].rfind('\n').map_or(0, |i| i + 1);
+    if !md[line_start..start].trim().is_empty() {
+        return start;
+    }
+    let mut pos = start;
+    loop {
+        let rest = &md[pos..end];
+        let trimmed = rest.trim_start_matches([' ', '\t']);
+        let ws = rest.len() - trimmed.len();
+        let digits = trimmed.chars().take_while(char::is_ascii_digit).count();
+        let hashes = trimmed.chars().take_while(|c| *c == '#').count();
+        let prefix = if (1..=6).contains(&hashes) && trimmed[hashes..].starts_with(' ') {
+            hashes + 1
+        } else if trimmed.starts_with("> ") {
+            2
+        } else if trimmed.starts_with('>') {
+            1
+        } else if trimmed.starts_with("- ")
+            || trimmed.starts_with("* ")
+            || trimmed.starts_with("+ ")
+        {
+            2
+        } else if (1..=9).contains(&digits)
+            && (trimmed[digits..].starts_with(". ") || trimmed[digits..].starts_with(") "))
+        {
+            digits + 2
+        } else {
+            return pos;
+        };
+        if pos + ws + prefix >= end {
+            return pos;
+        }
+        pos += ws + prefix;
+    }
+}
+
 /// Markdown to HTML with the given spans wrapped in `<mark>` tags.
 pub fn markdown_highlighted(md: &str, highlights: &[Highlight]) -> String {
     use std::collections::BTreeMap;
@@ -131,6 +170,7 @@ pub fn markdown_highlighted(md: &str, highlights: &[Highlight]) -> String {
             {
                 continue;
             }
+            let start = skip_block_prefix(md, start, end);
             at.entry(start).or_default().1.push(marker(0xE100, i));
             at.entry(end).or_default().0.push(marker(0xE200, i));
         }
@@ -304,5 +344,33 @@ mod tests {
         let h = markdown_highlighted(md, &[hl(vec![(9, 13)], 1)]);
         assert!(!h.contains("<b>"), "{h}");
         assert!(h.contains("text</mark>"), "{h}");
+    }
+
+    #[test]
+    fn highlight_of_whole_list_item_keeps_the_list() {
+        let md = "- one\n- two whole item\n- three";
+        let start = md.find("- two").unwrap();
+        let h = markdown_highlighted(
+            md,
+            &[hl(vec![(start, start + "- two whole item".len())], 1)],
+        );
+        assert_eq!(h.matches("<li>").count(), 3, "{h}");
+        assert!(
+            h.contains(r#"<li><mark class="add" data-n="1">two whole item</mark></li>"#),
+            "{h}"
+        );
+    }
+
+    #[test]
+    fn highlight_skips_heading_quote_and_numbered_prefixes() {
+        for (md, inner) in [
+            ("# Title here", "<h1>"),
+            ("> quoted text", "<blockquote>"),
+            ("1. first step", "<ol>"),
+        ] {
+            let h = markdown_highlighted(md, &[hl(vec![(0, md.len())], 1)]);
+            assert!(h.contains(inner), "{md}: {h}");
+            assert!(h.contains("<mark"), "{md}: {h}");
+        }
     }
 }

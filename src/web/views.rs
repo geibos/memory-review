@@ -112,6 +112,7 @@ pub struct CardView {
 #[derive(Template)]
 #[template(path = "index.html")]
 pub struct IndexPage<'a> {
+    pub v: &'static str,
     pub t: &'a Strings,
     pub header: HeaderView,
     pub queue: QueueView,
@@ -121,6 +122,7 @@ pub struct IndexPage<'a> {
 #[derive(Template)]
 #[template(path = "settings.html")]
 pub struct SettingsPage<'a> {
+    pub v: &'static str,
     pub t: &'a Strings,
     pub header: HeaderView,
     pub models: Vec<String>,

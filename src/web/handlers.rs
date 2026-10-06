@@ -89,6 +89,7 @@ async fn page(s: &AppState, id: Option<i64>, filter: Option<&str>) -> Result<Res
         None => None,
     };
     html(IndexPage {
+        v: super::asset_version(),
         t: s.t,
         header: header_view(s).await?,
         queue,
@@ -357,6 +358,7 @@ async fn settings_page(s: &AppState, saved: bool, error: Option<String>) -> Resu
         models.insert(0, current.clone());
     }
     Ok(SettingsPage {
+        v: super::asset_version(),
         t: s.t,
         header: header_view(s).await?,
         models,

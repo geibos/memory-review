@@ -560,3 +560,13 @@ async fn accept_with_current_version_works() {
     t.post(&format!("/p/{id}/accept"), "version=1").await;
     assert_eq!(t.status(id).await, Status::Accepted);
 }
+
+#[tokio::test]
+async fn static_assets_are_versioned() {
+    let t = setup();
+    let (_, page) = t.get("/").await;
+    assert!(page.contains("/static/app.css?v="), "{page}");
+    assert!(page.contains("/static/app.js?v="), "{page}");
+    let (_, settings) = t.get("/settings").await;
+    assert!(settings.contains("/static/app.css?v="));
+}

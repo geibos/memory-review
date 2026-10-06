@@ -95,6 +95,22 @@ async fn events(
     Sse::new(stream).keep_alive(KeepAlive::default())
 }
 
+/// Short hash of the bundled CSS and JS, appended to their URLs so browsers
+/// drop cached copies after an upgrade.
+pub fn asset_version() -> &'static str {
+    use sha2::{Digest, Sha256};
+    static V: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        let mut h = Sha256::new();
+        for name in ["app.css", "app.js", "htmx.min.js"] {
+            if let Some((bytes, _)) = asset(name) {
+                h.update(bytes);
+            }
+        }
+        hex::encode(h.finalize())[..10].to_string()
+    })
+}
+
 macro_rules! assets {
     ($($name:literal => $mime:literal),* $(,)?) => {
         fn asset(path: &str) -> Option<(&'static [u8], &'static str)> {
