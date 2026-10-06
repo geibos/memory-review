@@ -724,7 +724,14 @@ impl Agent {
             .await?;
 
         if let Some(v) = revised {
-            let bump = v.draft != card.draft;
+            // Accept acts on all of these, so changing any of them is a new
+            // version; only change notes and the rationale keep it.
+            let bump = v.draft != card.draft
+                || v.action != card.action
+                || v.target_dir != card.target_dir
+                || v.target_title != card.target_title
+                || v.tags != card.tags
+                || v.sources != rows.iter().map(|r| r.permalink.clone()).collect::<Vec<_>>();
             let mut new_rows = Vec::new();
             for p in &v.sources {
                 let note = match live.iter().find(|n| &n.permalink == p) {
@@ -1484,7 +1491,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reply_moving_folder_keeps_version() {
+    async fn reply_moving_folder_bumps_version() {
         let w = World::new();
         let a = w.mem.add("inbox", "A", "- [fact] a");
         w.llm.push_tool(promote(&a));
@@ -1498,6 +1505,26 @@ mod tests {
         w.agent().reply(id).await.unwrap();
         let card = w.card(id).await;
         assert_eq!(card.target_dir.as_deref(), Some("ops"));
-        assert_eq!(card.version, 1);
+        assert_eq!(card.version, 2, "Accept would act on a new target");
+    }
+
+    #[tokio::test]
+    async fn reply_changing_action_bumps_version() {
+        let w = World::new();
+        let a = w.mem.add("inbox", "A", "- [fact] a");
+        w.llm.push_tool(promote(&a));
+        let TriageResult::Created(id) = w.agent().triage(&a).await.unwrap() else {
+            panic!()
+        };
+        w.comment(id, "Drop it").await;
+        w.set_working(id, Status::Ready).await;
+        w.llm
+            .push_tool(json!({"reply": "Will delete.", "action": "delete"}));
+        w.agent().reply(id).await.unwrap();
+        let card = w.card(id).await;
+        assert_eq!(
+            card.version, 2,
+            "a tab showing the promote must not accept the delete"
+        );
     }
 }

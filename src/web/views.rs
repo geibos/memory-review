@@ -317,11 +317,8 @@ fn annotate(
         let Some(Anchor::Draft { version, quote }) = &m.anchor else {
             continue;
         };
-        let spans = if *version == p.version {
-            locate(&clean, quote)
-        } else {
-            None
-        };
+        // Highlight while the quote is still in the text, whatever the version.
+        let spans = locate(&clean, quote);
         items.push(Item {
             pos: spans.as_ref().map(|s| s[0].0),
             note: NoteView {
@@ -576,15 +573,21 @@ mod tests {
     #[test]
     fn comment_on_current_version_highlighted_old_version_tagged() {
         let p = proposal("- alpha beta gamma", vec![], 2);
-        let msgs = [comment("beta gamma", 2), comment("alpha", 1)];
+        let msgs = [
+            comment("beta gamma", 2),
+            comment("alpha", 1),
+            comment("not in text", 1),
+        ];
         let c = card_view(strings(Lang::En), "verified", &p, &src(), &msgs, None);
-        assert_eq!(c.notes.len(), 2);
-        assert!(c.notes[0].is_comment && c.notes[0].found && c.notes[0].class == "cm");
-        assert_eq!(c.notes[1].version_tag, Some(1));
-        assert!(!c.notes[1].found);
+        assert_eq!(c.notes.len(), 3);
+        // An older comment whose quote is still in the text stays highlighted.
+        assert!(c.notes[0].found && c.notes[0].text == "alpha");
+        assert_eq!(c.notes[0].version_tag, Some(1));
+        assert!(c.notes[1].is_comment && c.notes[1].found && c.notes[1].version_tag.is_none());
+        assert!(!c.notes[2].found);
         assert!(
             c.draft_html
-                .contains(r#"<mark class="cm" data-n="1">beta gamma</mark>"#),
+                .contains(r#"<mark class="cm" data-n="2">beta gamma</mark>"#),
             "{}",
             c.draft_html
         );
