@@ -47,6 +47,21 @@ pub enum LlmOutcome {
     Text(String),
 }
 
+/// The model in use; changed from the settings page, read on every request.
+pub type ModelHandle = std::sync::Arc<std::sync::RwLock<String>>;
+
+pub fn model_handle(initial: impl Into<String>) -> ModelHandle {
+    std::sync::Arc::new(std::sync::RwLock::new(initial.into()))
+}
+
+pub fn current_model(h: &ModelHandle) -> String {
+    h.read().unwrap_or_else(|p| p.into_inner()).clone()
+}
+
+pub fn set_model(h: &ModelHandle, model: &str) {
+    *h.write().unwrap_or_else(|p| p.into_inner()) = model.to_string();
+}
+
 // async-trait (dyn): held as `Arc<dyn Llm>` so tests can script replies.
 #[async_trait]
 pub trait Llm: Send + Sync {
@@ -55,18 +70,28 @@ pub trait Llm: Send + Sync {
         messages: &[ChatMessage],
         tool: &ToolSpec,
     ) -> anyhow::Result<LlmOutcome>;
+
+    /// Name of the model the next call will use.
+    fn model(&self) -> String;
+}
+
+/// Models the endpoint offers to our key.
+// async-trait (dyn): held as `Arc<dyn ModelCatalog>` in the web state.
+#[async_trait]
+pub trait ModelCatalog: Send + Sync {
+    async fn list_models(&self) -> anyhow::Result<Vec<String>>;
 }
 
 pub struct LiteLlm {
     http: reqwest::Client,
     url: String,
     key: String,
-    model: String,
+    model: ModelHandle,
     retry_delay: Duration,
 }
 
 impl LiteLlm {
-    pub fn new(url: String, key: String, model: String) -> LiteLlm {
+    pub fn new(url: String, key: String, model: ModelHandle) -> LiteLlm {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(180))
             .build()
@@ -92,7 +117,7 @@ impl Llm for LiteLlm {
         // Forced tool choice is not supported for some models behind LiteLLM,
         // so the prompt asks for the call and `auto` lets the model comply.
         let body = json!({
-            "model": self.model,
+            "model": current_model(&self.model),
             "messages": messages.iter()
                 .map(|m| json!({ "role": m.role, "content": m.content }))
                 .collect::<Vec<_>>(),
@@ -154,6 +179,37 @@ impl Llm for LiteLlm {
             message["content"].as_str().unwrap_or_default().to_string(),
         ))
     }
+
+    fn model(&self) -> String {
+        current_model(&self.model)
+    }
+}
+
+#[async_trait]
+impl ModelCatalog for LiteLlm {
+    /// cancel-safe: yes — read-only.
+    async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+        let resp = self
+            .http
+            .get(format!("{}/v1/models", self.url))
+            .bearer_auth(&self.key)
+            .timeout(Duration::from_secs(15))
+            .send()
+            .await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("listing models returned HTTP {}", resp.status().as_u16());
+        }
+        let v: Value = resp.json().await?;
+        let mut ids: Vec<String> = v["data"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m["id"].as_str().map(str::to_string))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        Ok(ids)
+    }
 }
 
 #[cfg(test)]
@@ -198,6 +254,22 @@ pub mod fake {
                 .unwrap()
                 .pop_front()
                 .unwrap_or_else(|| Err(anyhow::anyhow!("FakeLlm: no scripted reply left")))
+        }
+
+        fn model(&self) -> String {
+            "fake-model".into()
+        }
+    }
+
+    /// `None` makes `list_models` fail, like an unreachable endpoint.
+    pub struct FakeCatalog(pub Option<Vec<String>>);
+
+    #[async_trait]
+    impl ModelCatalog for FakeCatalog {
+        async fn list_models(&self) -> anyhow::Result<Vec<String>> {
+            self.0
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("catalog unavailable"))
         }
     }
 }
@@ -259,7 +331,7 @@ mod tests {
     }
 
     fn client(url: String) -> LiteLlm {
-        let mut c = LiteLlm::new(url, "k".into(), "m".into());
+        let mut c = LiteLlm::new(url, "k".into(), model_handle("m"));
         c.retry_delay = Duration::from_millis(10);
         c
     }
@@ -346,5 +418,67 @@ mod tests {
             .unwrap_err();
         assert!(e.to_string().contains("400"), "{e}");
         assert_eq!(seen.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn request_uses_current_model() {
+        let ok = || {
+            (
+                200,
+                completion(json!({"role": "assistant", "content": "ok"})),
+            )
+        };
+        let (url, seen) = stub(vec![ok(), ok()]).await;
+        let handle = model_handle("first");
+        let c = LiteLlm::new(url, "k".into(), handle.clone());
+        c.call_tool(&[ChatMessage::user("a")], &tool())
+            .await
+            .unwrap();
+        set_model(&handle, "second");
+        assert_eq!(c.model(), "second");
+        c.call_tool(&[ChatMessage::user("b")], &tool())
+            .await
+            .unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0].1["model"], "first");
+        assert_eq!(seen[1].1["model"], "second");
+    }
+
+    async fn models_stub(status: u16, body: Value) -> (String, Arc<Mutex<Vec<HeaderMap>>>) {
+        let seen: Arc<Mutex<Vec<HeaderMap>>> = Arc::default();
+        let s = seen.clone();
+        let app = Router::new().route(
+            "/v1/models",
+            axum::routing::get(move |headers: HeaderMap| {
+                let s = s.clone();
+                let body = body.clone();
+                async move {
+                    s.lock().unwrap().push(headers);
+                    (StatusCode::from_u16(status).unwrap(), axum::Json(body))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        (format!("http://{addr}"), seen)
+    }
+
+    #[tokio::test]
+    async fn list_models_parses_ids() {
+        let (url, seen) = models_stub(
+            200,
+            json!({"data": [{"id": "b"}, {"id": "a"}, {"id": "b"}]}),
+        )
+        .await;
+        let models = client(url).list_models().await.unwrap();
+        assert_eq!(models, ["a", "b"]);
+        assert_eq!(seen.lock().unwrap()[0]["authorization"], "Bearer k");
+    }
+
+    #[tokio::test]
+    async fn list_models_error_on_5xx() {
+        let (url, _) = models_stub(503, json!({})).await;
+        assert!(client(url).list_models().await.is_err());
     }
 }

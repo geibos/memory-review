@@ -6,7 +6,7 @@ use memory_review::agent::{Agent, AgentCfg};
 use memory_review::config::Config;
 use memory_review::db::{self, Db};
 use memory_review::i18n::strings;
-use memory_review::llm::LiteLlm;
+use memory_review::llm::{LiteLlm, model_handle};
 use memory_review::memory::McpMemory;
 use memory_review::prompts::Prompts;
 use memory_review::web::{AppState, router};
@@ -31,10 +31,16 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     let memory = Arc::new(McpMemory::new(cfg.mcp_url.clone(), cfg.project.clone()));
+    // The settings page overrides MR_MODEL; MR_MODEL is the default.
+    let initial_model = db
+        .call(|c| db::get_setting(c, "model"))
+        .await?
+        .unwrap_or_else(|| cfg.model.clone());
+    let model = model_handle(initial_model);
     let llm = Arc::new(LiteLlm::new(
         cfg.llm_url.clone(),
         cfg.llm_key.clone(),
-        cfg.model.clone(),
+        model.clone(),
     ));
     let prompts = Arc::new(Prompts::load(cfg.prompts_dir.as_deref())?);
     let agent = Agent {
