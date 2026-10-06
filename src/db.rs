@@ -12,7 +12,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
-use crate::domain::{Action, Event, Status, ValidatedProposal, transition};
+use crate::domain::{Action, Anchor, Change, Event, Status, ValidatedProposal, transition};
 
 #[derive(Clone)]
 pub struct Db(Arc<Mutex<Connection>>);
@@ -46,6 +46,8 @@ pub struct ProposalRow {
     pub error: Option<String>,
     pub applied_permalink: Option<String>,
     pub updated_at: OffsetDateTime,
+    /// Change notes for the current draft version.
+    pub changes: Vec<Change>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,6 +58,9 @@ pub struct MessageRow {
     pub draft_version: i64,
     pub sent: bool,
     pub created_at: OffsetDateTime,
+    pub anchor: Option<Anchor>,
+    /// Model that wrote an agent message.
+    pub model: Option<String>,
 }
 
 pub struct NewProposal {
@@ -103,6 +108,14 @@ CREATE TABLE messages(
 CREATE INDEX messages_by_proposal ON messages(proposal_id);
 ";
 
+/// v1 → v2: change notes, comment anchors and authoring model, settings.
+const SCHEMA_V2: &str = "
+ALTER TABLE proposals ADD COLUMN changes TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE messages ADD COLUMN anchor TEXT;
+ALTER TABLE messages ADD COLUMN model TEXT;
+CREATE TABLE settings(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+";
+
 impl Db {
     pub fn open(path: &Path) -> anyhow::Result<Db> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -121,11 +134,17 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
-        if version == 0 {
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", 1)?;
-        } else if version != 1 {
-            bail!("unsupported database schema version {version}");
+        match version {
+            0 => {
+                conn.execute_batch(&format!("BEGIN; {SCHEMA} {SCHEMA_V2} COMMIT;"))?;
+                conn.pragma_update(None, "user_version", 2)?;
+            }
+            1 => {
+                conn.execute_batch(&format!("BEGIN; {SCHEMA_V2} COMMIT;"))?;
+                conn.pragma_update(None, "user_version", 2)?;
+            }
+            2 => {}
+            v => bail!("unsupported database schema version {v}"),
         }
         Ok(Db(Arc::new(Mutex::new(conn))))
     }
@@ -201,6 +220,10 @@ fn insert_sources(
     Ok(())
 }
 
+fn changes_json(changes: &[Change]) -> String {
+    serde_json::to_string(changes).unwrap_or_else(|_| "[]".into())
+}
+
 fn tags_json(tags: &[String]) -> String {
     serde_json::to_string(tags).unwrap_or_else(|_| "[]".into())
 }
@@ -210,8 +233,8 @@ pub fn insert_proposal(c: &mut Connection, np: &NewProposal) -> anyhow::Result<i
     let t = fmt_time(now());
     tx.execute(
         "INSERT INTO proposals(action, status, target_dir, target_title, draft, tags, rationale,
-                               created_at, updated_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)",
+                               created_at, updated_at, changes)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8, ?9)",
         params![
             np.v.action.as_str(),
             Status::Ready.as_str(),
@@ -220,7 +243,8 @@ pub fn insert_proposal(c: &mut Connection, np: &NewProposal) -> anyhow::Result<i
             np.v.draft,
             tags_json(&np.v.tags),
             np.v.rationale,
-            t
+            t,
+            changes_json(&np.v.changes)
         ],
     )?;
     let id = tx.last_insert_rowid();
@@ -244,7 +268,7 @@ pub fn update_draft(
     let n = tx.execute(
         "UPDATE proposals SET action = ?2, target_dir = ?3, target_title = ?4, draft = ?5,
                 tags = ?6, rationale = ?7, version = version + 1, applied_permalink = NULL,
-                error = NULL,
+                error = NULL, changes = ?9,
                 updated_at = ?8
          WHERE id = ?1",
         params![
@@ -255,7 +279,8 @@ pub fn update_draft(
             v.draft,
             tags_json(&v.tags),
             v.rationale,
-            fmt_time(now())
+            fmt_time(now()),
+            changes_json(&v.changes)
         ],
     )?;
     if n != 1 {
@@ -339,7 +364,7 @@ fn parse_status(v: String) -> rusqlite::Result<Status> {
 pub fn get_proposal(c: &Connection, id: i64) -> anyhow::Result<Option<ProposalRow>> {
     Ok(c.query_row(
         "SELECT id, action, status, target_dir, target_title, draft, tags, rationale, version,
-                snoozed_until, error, applied_permalink, updated_at
+                snoozed_until, error, applied_permalink, updated_at, changes
          FROM proposals WHERE id = ?1",
         params![id],
         |r| {
@@ -361,6 +386,7 @@ pub fn get_proposal(c: &Connection, id: i64) -> anyhow::Result<Option<ProposalRo
                 error: r.get(10)?,
                 applied_permalink: r.get(11)?,
                 updated_at: parse_time(&r.get::<_, String>(12)?)?,
+                changes: serde_json::from_str(&r.get::<_, String>(13)?).unwrap_or_default(),
             })
         },
     )
@@ -444,15 +470,7 @@ pub fn add_message(
     body: &str,
     sent: bool,
 ) -> anyhow::Result<i64> {
-    c.execute(
-        "INSERT INTO messages(proposal_id, author, body, draft_version, sent, created_at)
-         SELECT ?1, ?2, ?3, version, ?4, ?5 FROM proposals WHERE id = ?1",
-        params![id, author, body, sent, fmt_time(now())],
-    )?;
-    if c.changes() != 1 {
-        bail!("card {id} not found");
-    }
-    Ok(c.last_insert_rowid())
+    add_message_ext(c, id, author, body, sent, None, None)
 }
 
 fn message_rows(c: &Connection, sql: &str, id: i64) -> anyhow::Result<Vec<MessageRow>> {
@@ -465,6 +483,10 @@ fn message_rows(c: &Connection, sql: &str, id: i64) -> anyhow::Result<Vec<Messag
             draft_version: r.get(3)?,
             sent: r.get(4)?,
             created_at: parse_time(&r.get::<_, String>(5)?)?,
+            anchor: r
+                .get::<_, Option<String>>(6)?
+                .and_then(|a| serde_json::from_str(&a).ok()),
+            model: r.get(7)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -473,7 +495,7 @@ fn message_rows(c: &Connection, sql: &str, id: i64) -> anyhow::Result<Vec<Messag
 pub fn messages(c: &Connection, id: i64) -> anyhow::Result<Vec<MessageRow>> {
     message_rows(
         c,
-        "SELECT id, author, body, draft_version, sent, created_at FROM messages
+        "SELECT id, author, body, draft_version, sent, created_at, anchor, model FROM messages
          WHERE proposal_id = ?1 ORDER BY id",
         id,
     )
@@ -483,7 +505,7 @@ pub fn messages(c: &Connection, id: i64) -> anyhow::Result<Vec<MessageRow>> {
 pub fn mark_sent(c: &Connection, id: i64) -> anyhow::Result<Vec<MessageRow>> {
     let pending = message_rows(
         c,
-        "SELECT id, author, body, draft_version, 1, created_at FROM messages
+        "SELECT id, author, body, draft_version, 1, created_at, anchor, model FROM messages
          WHERE proposal_id = ?1 AND sent = 0 AND author = 'human' ORDER BY id",
         id,
     )?;
@@ -492,6 +514,45 @@ pub fn mark_sent(c: &Connection, id: i64) -> anyhow::Result<Vec<MessageRow>> {
         params![id],
     )?;
     Ok(pending)
+}
+
+pub fn add_message_ext(
+    c: &Connection,
+    id: i64,
+    author: &str,
+    body: &str,
+    sent: bool,
+    anchor: Option<&Anchor>,
+    model: Option<&str>,
+) -> anyhow::Result<i64> {
+    let anchor = anchor.map(serde_json::to_string).transpose()?;
+    c.execute(
+        "INSERT INTO messages(proposal_id, author, body, draft_version, sent, created_at, anchor, model)
+         SELECT ?1, ?2, ?3, version, ?4, ?5, ?6, ?7 FROM proposals WHERE id = ?1",
+        params![id, author, body, sent, fmt_time(now()), anchor, model],
+    )?;
+    if c.changes() != 1 {
+        bail!("card {id} not found");
+    }
+    Ok(c.last_insert_rowid())
+}
+
+pub fn get_setting(c: &Connection, key: &str) -> anyhow::Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT value FROM settings WHERE key = ?1",
+        params![key],
+        |r| r.get(0),
+    )
+    .optional()?)
+}
+
+pub fn set_setting(c: &Connection, key: &str, value: &str) -> anyhow::Result<()> {
+    c.execute(
+        "INSERT INTO settings(key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
 }
 
 /// Moves a card along the lifecycle if it is still in `from`.
@@ -504,7 +565,7 @@ pub fn advance(c: &Connection, id: i64, from: Status, ev: &Event) -> anyhow::Res
 pub fn pending_human(c: &Connection, id: i64) -> anyhow::Result<Vec<MessageRow>> {
     message_rows(
         c,
-        "SELECT id, author, body, draft_version, sent, created_at FROM messages
+        "SELECT id, author, body, draft_version, sent, created_at, anchor, model FROM messages
          WHERE proposal_id = ?1 AND sent = 0 AND author = 'human' ORDER BY id",
         id,
     )
@@ -925,5 +986,134 @@ mod tests {
         let m = db.call(move |c| messages(c, a)).await.unwrap();
         assert_eq!(m.last().unwrap().author, "system");
         assert!(db.call(move |c| messages(c, b)).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn migrates_v1_file_to_v2() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("v1.db");
+        {
+            let c = Connection::open(&path).unwrap();
+            c.execute_batch(SCHEMA).unwrap();
+            c.pragma_update(None, "user_version", 1).unwrap();
+            c.execute(
+                "INSERT INTO proposals(action, status, rationale, created_at, updated_at)
+                 VALUES ('promote', 'ready', 'r', '2026-10-05T00:00:00Z', '2026-10-05T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        let db = Db::open(&path).unwrap();
+        let p = db.call(|c| get_proposal(c, 1)).await.unwrap().unwrap();
+        assert!(p.changes.is_empty());
+        let v: i64 = db
+            .call(|c| Ok(c.pragma_query_value(None, "user_version", |r| r.get(0))?))
+            .await
+            .unwrap();
+        assert_eq!(v, 2);
+        db.call(|c| set_setting(c, "model", "m")).await.unwrap();
+        drop(db);
+        // Reopening an already migrated file is a no-op.
+        let db = Db::open(&path).unwrap();
+        assert_eq!(
+            db.call(|c| get_setting(c, "model"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("m")
+        );
+    }
+
+    #[tokio::test]
+    async fn changes_roundtrip_through_insert_and_update() {
+        use crate::domain::ChangeKind;
+        let db = Db::open_in_memory().unwrap();
+        let mut n = np(&["p/inbox/a"]);
+        n.v.changes = vec![Change {
+            kind: ChangeKind::Added,
+            text: "t".into(),
+            source: None,
+            why: "w".into(),
+        }];
+        let id = db.call(move |c| insert_proposal(c, &n)).await.unwrap();
+        let p = db
+            .call(move |c| get_proposal(c, id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.changes[0].text, "t");
+        let mut n = np(&["p/inbox/a"]);
+        n.v.changes = vec![Change {
+            kind: ChangeKind::Removed,
+            text: "gone".into(),
+            source: Some("p/inbox/a".into()),
+            why: "w".into(),
+        }];
+        db.call(move |c| update_draft(c, id, &n.v, &n.sources))
+            .await
+            .unwrap();
+        let p = db
+            .call(move |c| get_proposal(c, id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.changes.len(), 1);
+        assert_eq!(p.changes[0].text, "gone");
+    }
+
+    #[tokio::test]
+    async fn message_anchor_and_model_roundtrip() {
+        let db = Db::open_in_memory().unwrap();
+        let id = insert(&db, &["p/inbox/a"]).await;
+        db.call(move |c| {
+            add_message_ext(
+                c,
+                id,
+                "human",
+                "fix",
+                false,
+                Some(&Anchor::Draft {
+                    version: 1,
+                    quote: "q".into(),
+                }),
+                None,
+            )?;
+            add_message_ext(c, id, "agent", "ok", true, None, Some("m-1"))?;
+            add_message(c, id, "human", "plain", false)
+        })
+        .await
+        .unwrap();
+        let m = db.call(move |c| messages(c, id)).await.unwrap();
+        assert_eq!(
+            m[0].anchor,
+            Some(Anchor::Draft {
+                version: 1,
+                quote: "q".into()
+            })
+        );
+        assert_eq!(m[1].model.as_deref(), Some("m-1"));
+        assert!(m[2].anchor.is_none() && m[2].model.is_none());
+        let pending = db.call(move |c| pending_human(c, id)).await.unwrap();
+        assert!(pending[0].anchor.is_some());
+    }
+
+    #[tokio::test]
+    async fn settings_get_set_overwrite() {
+        let db = Db::open_in_memory().unwrap();
+        assert!(
+            db.call(|c| get_setting(c, "model"))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        db.call(|c| set_setting(c, "model", "a")).await.unwrap();
+        db.call(|c| set_setting(c, "model", "b")).await.unwrap();
+        assert_eq!(
+            db.call(|c| get_setting(c, "model"))
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("b")
+        );
     }
 }
