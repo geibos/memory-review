@@ -17,6 +17,7 @@
     {% endif %}
     {% if c.can_accept %}
     <form hx-post="/p/{{ c.id }}/accept" hx-target="#card" hx-swap="outerHTML" id="accept-form">
+      <input type="hidden" name="version" value="{{ c.version }}">
       <button class="btn ok" id="act-accept" type="button" data-label="{{ t.accept }}" data-armed="{{ t.accept_again }}">{{ t.accept }} <kbd>A</kbd></button>
     </form>
     {% endif %}
@@ -30,24 +31,50 @@
   {% if let Some(e) = c.error %}<div class="notice err mono">{{ e }}</div>{% endif %}
 
   <div class="tabs">
-    <input type="radio" name="tab-{{ c.id }}" id="tab-diff" checked><label for="tab-diff">{{ t.tab_diff }}</label>
-    <input type="radio" name="tab-{{ c.id }}" id="tab-draft"><label for="tab-draft">{{ t.tab_draft }}</label>
+    <input type="radio" name="tab-{{ c.id }}" id="tab-draft" checked><label for="tab-draft">{{ t.tab_draft }}</label>
+    <input type="radio" name="tab-{{ c.id }}" id="tab-diff"><label for="tab-diff">{{ t.tab_diff }}</label>
     <input type="radio" name="tab-{{ c.id }}" id="tab-src"><label for="tab-src">{{ t.tab_sources }} · {{ c.sources.len() }}</label>
-    <div class="panel p-diff">
+
+    <div class="panel p-draft">
       {% if c.has_draft %}
-        {% for d in c.diffs %}
-        <div class="diff-title mono">{{ d.permalink }}</div>
-        <div class="diff">{% for l in d.lines %}<span class="{{ l.class() }}">{{ l.sign() }} {{ l.text }}</span>{% endfor %}</div>
-        {% endfor %}
+      <div class="draft-grid">
+        <div class="md draft-body" data-version="{{ c.version }}">{{ c.draft_html|safe }}
+          {% if !c.tags.is_empty() %}<p class="meta">#{{ c.tags.join(" #") }}</p>{% endif %}
+        </div>
+        <aside class="margin">
+          <div class="margin-title">{{ t.what_model_did }}</div>
+          {% for n in c.notes %}
+          <div class="note {{ n.class }}{% if !n.found %} unfound{% endif %}{% if n.unsent %} unsent{% endif %}" data-n="{{ n.n }}">
+            <div class="note-head"><span class="num">{{ n.n }}</span><b>{{ n.label }}</b>{% if let Some(v) = n.version_tag %}<span class="meta">{{ t.to_version }}{{ v }}</span>{% endif %}{% if !n.found && n.class != "rm" && n.version_tag.is_none() %}<span class="meta">· {{ t.not_found_in_text }}</span>{% endif %}</div>
+            {% if n.class == "rm" %}
+            <details><summary class="quote">{{ n.text }}</summary>
+              <div class="quote full">{{ n.text }}</div>
+              {% if let Some(s) = n.source %}<div class="meta mono">{{ t.from_source }} {{ s }}</div>{% endif %}
+            </details>
+            {% else %}{% if !n.found || n.is_comment %}<div class="quote">«{{ n.text }}»</div>{% endif %}{% endif %}
+            <div class="note-why">{{ n.why }}</div>
+          </div>
+          {% endfor %}
+          <div id="margin-slot"></div>
+        </aside>
+      </div>
       {% else %}
         <p class="meta">{{ t.no_draft }}</p>
         {% for s in c.sources %}<div class="diff-title mono">− {{ s.permalink }}</div>{% endfor %}
       {% endif %}
     </div>
-    <div class="panel p-draft">
-      {% if c.has_draft %}<div class="md">{{ c.draft_html|safe }}</div>{% else %}<p class="meta">{{ t.no_draft }}</p>{% endif %}
-      {% if !c.tags.is_empty() %}<p class="meta">#{{ c.tags.join(" #") }}</p>{% endif %}
+
+    <div class="panel p-diff">
+      {% if c.has_draft %}
+        {% for d in c.diffs %}
+        <div class="diff-title mono">{{ d.permalink }}</div>
+        <div class="diff">{% for l in d.lines %}<div class="dl {{ l.class }}"><span class="dl-text">{{ l.sign }} {{ l.text }}</span>{% if c.can_comment %}<button type="button" class="line-c" title="{{ t.comment_fragment }}" data-permalink="{{ d.permalink }}" data-line="{{ l.key }}">💬</button>{% endif %}</div>{% if !l.comments.is_empty() %}<div class="line-comments">{% for m in l.comments %}<div class="msg {{ m.class }}{% if m.unsent %} unsent{% endif %}"><div class="who"><b>{{ m.who }}</b>{% if m.unsent %}<span>· {{ t.unsent }}</span>{% endif %}</div><div class="md">{{ m.html|safe }}</div></div>{% endfor %}</div>{% endif %}{% endfor %}</div>
+        {% endfor %}
+      {% else %}
+        <p class="meta">{{ t.no_draft }}</p>
+      {% endif %}
     </div>
+
     <div class="panel p-src">
       {% for s in c.sources %}
       <div class="src">
@@ -61,20 +88,29 @@
   <div class="thread">
     {% for m in c.thread %}
     <div class="msg {{ m.class }}{% if m.unsent %} unsent{% endif %}">
-      <div class="who"><b>{{ m.who }}</b><span>{{ t.draft_version }}{{ m.version }}</span><time datetime="{{ m.time }}">{{ m.time }}</time>{% if m.unsent %}<span>· {{ t.unsent }}</span>{% endif %}</div>
+      <div class="who"><b>{{ m.who }}</b>{% if let Some(model) = m.model %}<span class="mono">{{ model }}</span>{% endif %}<span>{{ t.draft_version }}{{ m.version }}</span><time datetime="{{ m.time }}">{{ m.time }}</time>{% if m.unsent %}<span>· {{ t.unsent }}</span>{% endif %}</div>
+      {% if let Some(q) = m.quote %}<div class="quote">«{{ q }}»</div>{% endif %}
       <div class="md">{{ m.html|safe }}</div>
     </div>
     {% endfor %}
     {% if c.can_comment %}
-    <form class="compose" hx-post="/p/{{ c.id }}/comment" hx-target="#card" hx-swap="outerHTML">
+    <div id="compose-home">
+    <form class="compose" id="compose" hx-post="/p/{{ c.id }}/comment" hx-target="#card" hx-swap="outerHTML">
+      <input type="hidden" name="anchor" value="">
+      <input type="hidden" name="quote" value="">
+      <input type="hidden" name="permalink" value="">
+      <input type="hidden" name="line" value="">
+      <div class="anchor-chip" hidden><span>{{ t.comment_on }}</span> <q></q> <button type="button" class="chip-x" title="{{ t.cancel }}">✕</button></div>
       <textarea id="comment" name="body" maxlength="20000" placeholder="{{ t.comment_placeholder }}  (C)"></textarea>
       <div class="actions">
         <button class="btn" type="submit" name="send" value="0">{{ t.add_comment }}</button>
         <button class="btn primary" type="submit" name="send" value="1" id="act-send" {% if !c.can_send_any %}disabled{% endif %}>{{ t.send_to_agent }} <kbd>⌘↵</kbd></button>
       </div>
     </form>
+    </div>
     {% endif %}
   </div>
+  <button type="button" class="float-c" id="float-c" hidden>💬 {{ t.comment_fragment }}</button>
   <p class="keys">{{ t.keys_hint }}</p>
 </div>
 </section>

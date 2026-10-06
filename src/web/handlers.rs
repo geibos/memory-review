@@ -11,7 +11,7 @@ use time::OffsetDateTime;
 use crate::agent::{Job, untriaged};
 use crate::apply::{self, ApplyResult};
 use crate::db::{self, QueueFilter};
-use crate::domain::{Event, Status, can_comment};
+use crate::domain::{Anchor, Event, Status, can_comment};
 
 use super::AppState;
 use super::views::{
@@ -196,6 +196,21 @@ pub struct CommentForm {
     body: String,
     #[serde(default)]
     send: String,
+    /// `draft`, `diff` or empty for a comment on the whole card.
+    #[serde(default)]
+    anchor: String,
+    #[serde(default)]
+    quote: String,
+    #[serde(default)]
+    permalink: String,
+    #[serde(default)]
+    line: String,
+}
+
+const MAX_QUOTE: usize = 500;
+
+fn clip_chars(s: &str, max: usize) -> String {
+    s.chars().take(max).collect()
 }
 
 pub async fn comment(
@@ -210,9 +225,37 @@ pub async fn comment(
     if text.chars().count() > MAX_COMMENT {
         return Ok((StatusCode::BAD_REQUEST, "comment is too long").into_response());
     }
+    let anchor = match f.anchor.as_str() {
+        "" => None,
+        "draft" => {
+            let quote = clip_chars(f.quote.trim(), MAX_QUOTE);
+            if quote.is_empty() {
+                return Ok((StatusCode::BAD_REQUEST, "quote is empty").into_response());
+            }
+            let version =
+                s.db.call(move |c| db::get_proposal(c, id))
+                    .await?
+                    .map(|p| p.version)
+                    .unwrap_or(1);
+            Some(Anchor::Draft { version, quote })
+        }
+        "diff" => {
+            let line = clip_chars(&f.line, MAX_QUOTE);
+            if f.permalink.trim().is_empty() || line.trim().is_empty() {
+                return Ok((StatusCode::BAD_REQUEST, "diff line is empty").into_response());
+            }
+            Some(Anchor::Diff {
+                permalink: f.permalink.trim().to_string(),
+                line,
+            })
+        }
+        _ => return Ok((StatusCode::BAD_REQUEST, "unknown anchor").into_response()),
+    };
     if !text.is_empty() && can_comment(status) {
-        s.db.call(move |c| db::add_message(c, id, "human", &text, false))
-            .await?;
+        s.db.call(move |c| {
+            db::add_message_ext(c, id, "human", &text, false, anchor.as_ref(), None)
+        })
+        .await?;
     }
     let mut notice = None;
     if f.send == "1" {
@@ -233,9 +276,24 @@ fn apply_notice(s: &AppState, r: &ApplyResult) -> Option<String> {
     }
 }
 
-pub async fn accept(State(s): State<AppState>, Path(id): Path<i64>) -> Result<Response> {
-    if status_of(&s, id).await?.is_none() {
+#[derive(Deserialize)]
+pub struct AcceptForm {
+    version: Option<i64>,
+}
+
+pub async fn accept(
+    State(s): State<AppState>,
+    Path(id): Path<i64>,
+    Form(f): Form<AcceptForm>,
+) -> Result<Response> {
+    let Some(card) = s.db.call(move |c| db::get_proposal(c, id)).await? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    // The draft can only change outside `ready`, and accept itself requires
+    // `ready`, so checking the version here is enough.
+    if f.version.is_some_and(|v| v != card.version) {
+        let notice = Some(s.t.draft_changed.to_string());
+        return card_response(&s, load_card(&s, id, notice).await?);
     }
     let r = apply::accept(
         &s.db,

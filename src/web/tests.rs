@@ -459,3 +459,104 @@ async fn header_shows_model() {
     assert!(h.contains("shown-model"), "{h}");
     assert!(h.contains(r#"href="/settings""#), "{h}");
 }
+
+#[tokio::test]
+async fn draft_tab_is_default() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let (_, frag) = t.htmx_get(&format!("/p/{id}")).await;
+    assert!(frag.contains(r#"id="tab-draft" checked"#), "{frag}");
+}
+
+#[tokio::test]
+async fn anchored_draft_comment_saved_and_highlighted() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let (s, frag, _) = t
+        .post(
+            &format!("/p/{id}/comment"),
+            "body=Too+vague&send=0&anchor=draft&quote=final",
+        )
+        .await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(frag.contains(r#"class="cm""#), "{frag}");
+    let m = t.state.db.call(move |c| db::messages(c, id)).await.unwrap();
+    assert_eq!(
+        m[0].anchor,
+        Some(crate::domain::Anchor::Draft {
+            version: 1,
+            quote: "final".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn anchored_comment_without_quote_rejected() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let (s, _, _) = t
+        .post(
+            &format!("/p/{id}/comment"),
+            "body=x&send=0&anchor=draft&quote=",
+        )
+        .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn long_quote_truncated_to_500_chars() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let q = "q".repeat(700);
+    t.post(
+        &format!("/p/{id}/comment"),
+        &format!("body=x&send=0&anchor=draft&quote={q}"),
+    )
+    .await;
+    let m = t.state.db.call(move |c| db::messages(c, id)).await.unwrap();
+    let Some(crate::domain::Anchor::Draft { quote, .. }) = &m[0].anchor else {
+        panic!()
+    };
+    assert_eq!(quote.chars().count(), 500);
+}
+
+#[tokio::test]
+async fn diff_line_comment_saved_and_shown_under_line() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let form = format!("body=Keep+this&send=0&anchor=diff&permalink={a}&line=-+a");
+    let (s, frag, _) = t.post(&format!("/p/{id}/comment"), &form).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(frag.contains("line-comments"), "{frag}");
+    let m = t.state.db.call(move |c| db::messages(c, id)).await.unwrap();
+    assert!(matches!(
+        m[0].anchor,
+        Some(crate::domain::Anchor::Diff { .. })
+    ));
+}
+
+#[tokio::test]
+async fn accept_with_stale_version_is_refused() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    let (s, frag, _) = t.post(&format!("/p/{id}/accept"), "version=7").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(frag.contains(t.state.t.draft_changed), "{frag}");
+    assert_eq!(t.status(id).await, Status::Ready);
+    assert!(t.mem.raw(&a).is_some());
+}
+
+#[tokio::test]
+async fn accept_with_current_version_works() {
+    let t = setup();
+    let a = t.mem.add("inbox", "A", "a");
+    let id = t.card(Action::Promote, &[&a]).await;
+    t.post(&format!("/p/{id}/accept"), "version=1").await;
+    assert_eq!(t.status(id).await, Status::Accepted);
+}

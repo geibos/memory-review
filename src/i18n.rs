@@ -82,6 +82,19 @@ strings! {
     save: "Save", "Сохранить";
     saved: "Saved. The next agent run uses this model.", "Сохранено. Следующий запуск агента пойдёт через эту модель.";
     bad_model: "Model name must be 1–200 characters without spaces.", "Имя модели — от 1 до 200 символов, без пробелов.";
+    what_model_did: "What the model did", "Что сделала модель";
+    note_added: "added", "добавлено";
+    note_rewritten: "rewritten", "переписано";
+    note_removed: "removed", "убрано";
+    note_comment: "you", "ты";
+    not_found_in_text: "not found in the text", "в тексте не найдено";
+    to_version: "on v", "к v";
+    comment_fragment: "Comment", "Комментировать";
+    comment_on: "Comment on", "Комментарий к";
+    cancel: "Cancel", "Отмена";
+    draft_changed: "The draft changed since you opened it; look at the new version first.", "Чистовик обновился с тех пор, как вы его открыли, — сначала посмотрите новую версию.";
+    show_removed: "show", "показать";
+    from_source: "from", "из";
 }
 
 pub fn strings(lang: Lang) -> &'static Strings {

@@ -199,3 +199,54 @@ kbd { font-size: 10px; border: 1px solid currentColor; border-bottom-width: 2px;
 .settings-form select, .settings-form input { font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--surface1); border-radius: 8px; padding: 8px 10px; }
 .settings-form .readonly { padding: 8px 10px; border-radius: 8px; background: var(--crust); color: var(--subtext1); overflow-wrap: anywhere; }
 .settings-form .btn { margin-top: 12px; }
+
+/* Draft with change notes (v2) */
+.draft-grid { display: grid; grid-template-columns: minmax(0, 1fr) 290px; gap: 22px; align-items: start; }
+.margin { display: grid; gap: 8px; position: sticky; top: 8px; }
+.margin-title { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--subtext0); }
+.margin:not(:has(.note)) .margin-title { display: none; }
+@media (max-width: 1100px) {
+  .draft-grid { grid-template-columns: 1fr; }
+  .margin { order: -1; position: static; padding-bottom: 12px; border-bottom: 1px dashed var(--surface1); }
+}
+.md mark { color: inherit; border-radius: 3px; padding: 0 1px; transition: box-shadow .12s; }
+.md mark[data-n]::after { content: attr(data-n); display: inline-block; font: 700 9px/14px Inter, sans-serif; min-width: 14px; height: 14px; text-align: center; border-radius: 7px; margin-left: 2px; vertical-align: super; color: var(--crust); }
+.md mark.add { background: color-mix(in srgb, var(--green) 18%, transparent); box-shadow: inset 0 -2px 0 var(--green); }
+.md mark.add::after { background: var(--green); }
+.md mark.chg { background: color-mix(in srgb, var(--mauve) 18%, transparent); box-shadow: inset 0 -2px 0 var(--mauve); }
+.md mark.chg::after { background: var(--mauve); }
+.md mark.cm { background: color-mix(in srgb, var(--yellow) 22%, transparent); border-bottom: 2px dashed var(--yellow); }
+.md mark.cm::after { background: var(--yellow); }
+.md mark.hl { outline: 2px solid currentColor; outline-offset: 1px; }
+.note { border: 1px solid var(--surface0); background: var(--base); border-radius: 10px; padding: 8px 11px; font-size: 12.5px; border-left-width: 3px; }
+.note.add { border-left-color: var(--green); } .note.chg { border-left-color: var(--mauve); }
+.note.rm { border-left-color: var(--red); } .note.cm { border-left-color: var(--yellow); }
+.note.unsent { border-style: dashed; border-left-style: solid; }
+.note.unfound:not(.rm):not(.cm) { opacity: .8; }
+.note.hl { box-shadow: 0 0 0 2px var(--surface1); }
+.note-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.note-head b { font-size: 10.5px; text-transform: uppercase; letter-spacing: .4px; }
+.note.add b { color: var(--green); } .note.chg b { color: var(--mauve); } .note.rm b { color: var(--red); } .note.cm b { color: var(--yellow); }
+.num { display: inline-block; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 8px; font-size: 10px; font-weight: 700; color: var(--crust); background: var(--overlay0); }
+.note.add .num { background: var(--green); } .note.chg .num { background: var(--mauve); } .note.rm .num { background: var(--red); } .note.cm .num { background: var(--yellow); }
+.note-why { color: var(--subtext1); }
+.quote { font-size: 12px; color: var(--subtext0); font-style: italic; overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; margin: 2px 0; }
+.note details summary.quote { cursor: pointer; white-space: nowrap; list-style: none; }
+.note details summary.quote::after { content: " ▸"; font-style: normal; }
+.note details[open] summary.quote { display: none; }
+.quote.full { white-space: pre-wrap; font-style: normal; color: var(--red); font-family: "JetBrains Mono", monospace; font-size: 11.5px; }
+
+/* Diff line comments */
+.diff .dl { display: flex; align-items: flex-start; }
+.diff .dl .dl-text { flex: 1; }
+.line-c { visibility: hidden; border: 0; background: none; cursor: pointer; padding: 0 8px; font-size: 12px; }
+.diff .dl:hover .line-c, .line-c:focus-visible { visibility: visible; }
+.line-comments { padding: 4px 14px 8px 28px; background: var(--base); }
+.line-comments .msg { margin-top: 6px; }
+
+/* Anchored compose */
+.anchor-chip { display: flex; align-items: baseline; gap: 6px; font-size: 12px; color: var(--subtext0); background: color-mix(in srgb, var(--yellow) 12%, transparent); border: 1px dashed var(--yellow); border-radius: 8px; padding: 5px 8px; }
+.anchor-chip q { flex: 1; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chip-x { border: 0; background: none; cursor: pointer; color: var(--subtext0); }
+.margin .compose, .line-comments .compose { margin-top: 4px; }
+.float-c { position: fixed; z-index: 20; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 8px; border: 0; background: var(--mauve); color: var(--on-accent); cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.25); }

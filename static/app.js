@@ -92,8 +92,78 @@
     }
   });
 
+  // ---- Anchored comments --------------------------------------------------
+  function draftSelection() {
+    const sel = window.getSelection();
+    const body = $("#card .draft-body");
+    if (!sel || sel.isCollapsed || !body || !body.contains(sel.anchorNode) || !body.contains(sel.focusNode)) return null;
+    const text = sel.toString().trim();
+    return text.length >= 3 ? { text, rect: sel.getRangeAt(0).getBoundingClientRect() } : null;
+  }
+  function anchorCompose(kind, fields, label, slot) {
+    const form = $("#compose");
+    if (!form) return;
+    form.elements.anchor.value = kind;
+    form.elements.quote.value = fields.quote || "";
+    form.elements.permalink.value = fields.permalink || "";
+    form.elements.line.value = fields.line || "";
+    const chip = $(".anchor-chip", form);
+    $("q", chip).textContent = label.length > 140 ? label.slice(0, 140) + "…" : label;
+    chip.hidden = false;
+    slot.appendChild(form);
+    $("#comment").focus();
+  }
+  function resetCompose() {
+    const form = $("#compose");
+    if (!form) return;
+    ["anchor", "quote", "permalink", "line"].forEach((n) => (form.elements[n].value = ""));
+    $(".anchor-chip", form).hidden = true;
+    $("#compose-home").appendChild(form);
+  }
+  function commentSelection() {
+    const s = draftSelection();
+    if (!s) return false;
+    anchorCompose("draft", { quote: s.text }, s.text, $("#margin-slot"));
+    $("#float-c").hidden = true;
+    return true;
+  }
+  document.addEventListener("mouseup", () => {
+    const btn = $("#float-c");
+    if (!btn) return;
+    const s = draftSelection();
+    if (!s) { btn.hidden = true; return; }
+    btn.style.top = Math.max(8, s.rect.top - 36) + "px";
+    btn.style.left = Math.min(window.innerWidth - 180, s.rect.left) + "px";
+    btn.hidden = false;
+  });
+  // Keep the selection when the floating button is pressed.
+  document.addEventListener("mousedown", (e) => { if (e.target.closest("#float-c")) e.preventDefault(); });
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("#float-c")) commentSelection();
+    if (e.target.closest(".chip-x")) resetCompose();
+    const lc = e.target.closest(".line-c");
+    if (lc) {
+      const row = lc.closest(".dl");
+      let slot = row.nextElementSibling;
+      if (!slot || !slot.classList.contains("line-comments")) {
+        slot = document.createElement("div");
+        slot.className = "line-comments";
+        row.after(slot);
+      }
+      anchorCompose("diff", { permalink: lc.dataset.permalink, line: lc.dataset.line }, lc.dataset.line, slot);
+    }
+  });
+  // Pair a margin note with its highlight.
+  function pair(e, on) {
+    const el = e.target.closest && e.target.closest("[data-n]");
+    if (!el || !el.closest("#card")) return;
+    $$('#card [data-n="' + el.dataset.n + '"]').forEach((x) => x.classList.toggle("hl", on));
+  }
+  document.addEventListener("mouseover", (e) => pair(e, true));
+  document.addEventListener("mouseout", (e) => pair(e, false));
+
   document.addEventListener("keydown", (e) => {
-    const inField = e.target.matches("textarea, input, select, [contenteditable]");
+    const inField = e.target.matches("textarea, input:not([type=radio]), select, [contenteditable]");
     if (inField) {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); clickIf("#act-send"); }
       if (e.key === "Escape") e.target.blur();
@@ -106,7 +176,11 @@
       case "a": pressAccept(); break;
       case "s": clickIf("#act-snooze"); break;
       case "r": clickIf("#act-regenerate"); break;
-      case "c": { const ta = $("#comment"); if (ta) { e.preventDefault(); ta.focus(); } break; }
+      case "c": {
+        e.preventDefault();
+        if (!commentSelection()) { const ta = $("#comment"); if (ta) ta.focus(); }
+        break;
+      }
       default: return;
     }
   });
